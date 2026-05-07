@@ -31,10 +31,10 @@ Construct intuitive, model-dependent coordinates for every training example usin
 1. Train a strong model (RoBERTa-large) on the full training set for several epochs, logging the model's predicted probability for the *gold label* of every example at the end of each epoch.
 2. For each example compute:
    $$
-   \hat{\mu}_i = \frac{1}{E}\sum_{e=1}^{E} p_{\theta^{(e)}}(y_i^* | x_i) \quad \text{(confidence)}
-   $$
-   $$
-   \hat{\sigma}_i = \sqrt{\frac{1}{E}\sum_{e=1}^{E} (p_{\theta^{(e)}}(y_i^* | x_i) - \hat{\mu}_i)^2} \quad \text{(variability)}
+   \begin{aligned}
+   \hat{\mu}_i &= \frac{1}{E}\sum_{e=1}^{E} p_{\theta^{(e)}}(y_i^* \mid x_i) \quad \text{(confidence)} \\
+   \hat{\sigma}_i &= \sqrt{\frac{1}{E}\sum_{e=1}^{E} \left(p_{\theta^{(e)}}(y_i^* \mid x_i) - \hat{\mu}_i\right)^2} \quad \text{(variability)}
+   \end{aligned}
    $$
 3. Plot every training example in 2D (variability vs. confidence) → the data map.
 4. Diagnose regions by:
