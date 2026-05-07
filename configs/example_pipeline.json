@@ -1,0 +1,9 @@
+{
+  "project_name": "cs162-dataset-cartography",
+  "input_epoch_logs": "data/raw/epoch_predictions.jsonl",
+  "coordinates_output": "data/processed/cartography_coordinates.jsonl",
+  "coordinates_with_regions_output": "data/processed/cartography_with_regions.jsonl",
+  "data_map_plot_output": "data/outputs/data_map.png",
+  "subset_output": "data/processed/selected_subset.jsonl"
+}
+
