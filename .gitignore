@@ -1,1 +1,3 @@
 docs/local-docs/*
+data/*
+**/__pycache__/*
