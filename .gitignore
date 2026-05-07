@@ -1,3 +1,10 @@
+#Directories
 docs/local-docs/*
 data/*
+
+#caches
 **/__pycache__/*
+
+#filetypes
+*.pyc
+.csv
