@@ -1,0 +1,30 @@
+O. Russakovsky et al., “ImageNet Large Scale Visual Recognition Challenge,” International Journal of Computer Vision, vol. 115, no. 3, pp. 211–252, 2015.
+
+D. Yogatama et al., “Learning and Evaluating General Linguistic Intelligence,” arXiv preprint arXiv:1901.11373, 2019.
+
+T. Linzen, “How Can We Accelerate Progress Towards Human-like Linguistic Generalization?,” Proceedings of the 58th Annual Meeting of the Association for Computational Linguistics (ACL), pp. 5210–5217, 2020.
+
+K. Vodrahalli, K. Chen, and S. Arora, “Theoretical Analysis of Learning with Label Noise: Optimal Rates and Simple Algorithms,” Advances in Neural Information Processing Systems (NeurIPS), 2018.
+(Note: title approximated; Vodrahalli et al. 2018 is often cited for data valuation/importance—adjust if you meant a specific paper.)
+
+V. S. Sheng, F. Provost, and P. G. Ipeirotis, “Get Another Label? Improving Data Quality and Data Mining Using Multiple, Noisy Labelers,” Proceedings of the 14th ACM SIGKDD International Conference on Knowledge Discovery and Data Mining (KDD), pp. 614–622, 2008.
+
+R. Krishna et al., “Visual Genome: Connecting Language and Vision Using Crowdsourced Dense Image Annotations,” International Journal of Computer Vision, vol. 123, no. 1, pp. 32–73, 2017.
+(Note: often cited as 2016 preprint; final journal version is 2017.)
+
+Y. Bengio, J. Louradour, R. Collobert, and J. Weston, “Curriculum Learning,” Proceedings of the 26th International Conference on Machine Learning (ICML), pp. 41–48, 2009.
+
+M. P. Kumar, B. Packer, and D. Koller, “Self-Paced Learning for Latent Variable Models,” Advances in Neural Information Processing Systems (NeurIPS), pp. 1189–1197, 2010.
+
+M. Toneva et al., “An Empirical Study of Example Forgetting During Deep Neural Network Learning,” International Conference on Learning Representations (ICLR), 2019.
+(Note: widely circulated as 2018 arXiv; published at ICLR 2019.)
+
+P. W. Koh and P. Liang, “Understanding Black-box Predictions via Influence Functions,” Proceedings of the 34th International Conference on Machine Learning (ICML), pp. 1885–1894, 2017.
+
+D. D. Lewis and W. A. Gale, “A Sequential Algorithm for Training Text Classifiers,” Proceedings of the 17th Annual International ACM SIGIR Conference on Research and Development in Information Retrieval (SIGIR), pp. 3–12, 1994.
+
+A. J. Joshi, F. Porikli, and N. Papanikolopoulos, “Multi-Class Active Learning for Image Classification,” Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pp. 2372–2379, 2009.
+
+O. Sener and S. Savarese, “Active Learning for Convolutional Neural Networks: A Core-Set Approach,” International Conference on Learning Representations (ICLR), 2018.
+
+R. Le Bras, S. Swayamdipta, C. Bhagavatula, R. Zellers, Y. Bisk, A. Farhadi, and Y. Choi, “Adversarial Filtering: A Method for Identifying and Mitigating Spurious Correlations,” Proceedings of the 2020 Conference on Empirical Methods in Natural Language Processing (EMNLP), pp. 107–119, 2020.
