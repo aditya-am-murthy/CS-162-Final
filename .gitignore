@@ -8,3 +8,9 @@ data/*
 #filetypes
 *.pyc
 .csv
+
+# secrets
+wandb_credentials.txt
+
+# wandb local run cache
+wandb/
