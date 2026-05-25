@@ -1,0 +1,10 @@
+{
+  "dataset": "snli",
+  "model_name": "roberta-base",
+  "epochs": 5,
+  "batch_size": 16,
+  "learning_rate": 2e-5,
+  "max_train_samples": 50000,
+  "max_eval_samples": 5000,
+  "output_logs": "data/raw/epoch_predictions_snli_roberta-base.jsonl"
+}

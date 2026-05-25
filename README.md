@@ -77,4 +77,40 @@ python scripts/05_uncertainty_checks.py
 python scripts/06_ambiguous_ablation.py
 ```
 
-Use real RoBERTa/GLUE training logs by replacing `data/raw/epoch_predictions_toy.jsonl` with your own JSONL (`guid`, `epoch`, `gold_label`, `pred_label`, `prob_gold` per row).
+## GPU training (real dynamics)
+
+Fine-tune on **SNLI** and write per-epoch logs the cartography pipeline expects:
+
+```bash
+conda activate cs162-cartography
+pip install -r requirements-train.txt
+# CUDA example (pick matching wheel from https://pytorch.org):
+# pip install torch --index-url https://download.pytorch.org/whl/cu124
+
+# fast (~minutes on one GPU): DistilBERT, 20k examples
+python scripts/train_and_collect_dynamics.py --preset distilbert --max-train-samples 20000 --epochs 5
+
+# larger: RoBERTa-base, 50k examples (use smaller batch if OOM)
+python scripts/train_and_collect_dynamics.py --config configs/train_snli_roberta_base.json
+
+# then cartography on *trained* logs (not toy synthetic)
+python scripts/01_collect_dynamics.py --input data/raw/epoch_predictions_snli_distilbert.jsonl
+python scripts/02_build_data_map.py --input data/processed/cartography_coordinates.jsonl
+python scripts/07_generate_insight_figures.py --input data/processed/cartography_with_regions.jsonl
+```
+
+| Preset | Model | VRAM (rough) | Notes |
+|--------|--------|--------------|--------|
+| `distilbert` | DistilBERT | ~4–6 GB | Best default for 1 GPU |
+| `roberta-base` | RoBERTa-base | ~8–12 GB | Paper-like, smaller than large |
+| `roberta-large` | RoBERTa-large | ~24 GB+ | Paper default; reduce batch / samples |
+
+Train on a **cartography subset** (after steps 01–03 on full trained logs):
+
+```bash
+python scripts/train_and_collect_dynamics.py --preset distilbert \\
+  --subset-file data/processed/selected_high_variability_33pct.jsonl \\
+  --output data/raw/epoch_predictions_subset_ambiguous.jsonl
+```
+
+Use `--max-train-samples 0` for the full SNLI train split (~550k; slow). Paper uses RoBERTa-**large** for 5–6 epochs; this repo supports smaller models for coursework GPUs.
