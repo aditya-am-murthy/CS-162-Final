@@ -21,6 +21,11 @@ _root = Path(__file__).resolve().parents[1]
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
+try:
+    import unsloth  # noqa: F401 — before transformers when ministral-3b runs
+except ImportError:
+    pass
+
 import argparse
 import json
 

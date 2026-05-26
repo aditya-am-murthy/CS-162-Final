@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -29,10 +29,60 @@ from ml_cartography.training.glue_trainer import (
     resolve_config_hidden_size,
 )
 
+# text-only tokenizer ids (avoid Unsloth/Pixtral processor treating SNLI as images)
+_MINISTRAL_TEXT_TOKENIZER_IDS = {
+    "3b": "mistralai/Ministral-3-3B-Base-2512",
+    "8b": "mistralai/Ministral-3-8B-Base-2512",
+    "14b": "mistralai/Ministral-3-14B-Base-2512",
+}
+
 
 def is_ministral3_model(model_name: str) -> bool:
     n = model_name.lower()
     return "ministral" in n or ("unsloth" in n and "mistral" in n)
+
+
+def _resolve_text_tokenizer_id(model_name: str) -> str:
+    n = model_name.lower()
+    if "14b" in n:
+        return _MINISTRAL_TEXT_TOKENIZER_IDS["14b"]
+    if "8b" in n:
+        return _MINISTRAL_TEXT_TOKENIZER_IDS["8b"]
+    return _MINISTRAL_TEXT_TOKENIZER_IDS["3b"]
+
+
+def _load_text_only_tokenizer(model_name: str):
+    from transformers import AutoTokenizer
+
+    tok_id = _resolve_text_tokenizer_id(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(tok_id, trust_remote_code=True)
+    ensure_padding_token(tokenizer)
+    return tokenizer
+
+
+def _as_text_tokenizer(tokenizer):
+    """Unsloth may return a multimodal Processor; use underlying text tokenizer."""
+    cls = type(tokenizer).__name__.lower()
+    if "processor" in cls or "pixtral" in cls:
+        inner = getattr(tokenizer, "tokenizer", None)
+        if inner is not None:
+            return inner
+    if hasattr(tokenizer, "tokenizer") and type(tokenizer).__name__ != "PreTrainedTokenizerFast":
+        inner = getattr(tokenizer, "tokenizer", None)
+        if inner is not None and callable(inner):
+            return inner
+    return tokenizer
+
+
+def _tokenize_snli(tokenizer, text: str, max_length: int) -> Dict:
+    tok = _as_text_tokenizer(tokenizer)
+    return tok(
+        text,
+        truncation=True,
+        max_length=max_length,
+        padding="max_length",
+        return_tensors="pt",
+    )
 
 
 class _SnliTextDataset(Dataset):
@@ -51,13 +101,7 @@ class _SnliTextDataset(Dataset):
             f"Hypothesis: {row['hypothesis']}\n"
             f"Label:"
         )
-        enc = self.tokenizer(
-            text,
-            truncation=True,
-            max_length=self.max_length,
-            padding="max_length",
-            return_tensors="pt",
-        )
+        enc = _tokenize_snli(self.tokenizer, text, self.max_length)
         return {
             "input_ids": enc["input_ids"].squeeze(0),
             "attention_mask": enc["attention_mask"].squeeze(0),
@@ -72,13 +116,27 @@ class SnliClassifierWrapper(nn.Module):
         self.backbone = backbone
         self.classifier = nn.Linear(hidden_size, num_labels)
 
-    def forward(self, input_ids, attention_mask=None, labels=None, **kwargs):
-        out = self.backbone(
+    def _forward_backbone(self, input_ids, attention_mask):
+        bb = self.backbone
+        kwargs = dict(
             input_ids=input_ids,
             attention_mask=attention_mask,
             output_hidden_states=True,
-            **kwargs,
         )
+        try:
+            return bb(**kwargs)
+        except TypeError:
+            pass
+        lm = getattr(bb, "language_model", None)
+        if lm is not None:
+            return lm(**kwargs)
+        inner = getattr(bb, "model", None)
+        if inner is not None and inner is not bb:
+            return inner(**kwargs)
+        return bb(**kwargs)
+
+    def forward(self, input_ids, attention_mask=None, labels=None, **kwargs):
+        out = self._forward_backbone(input_ids, attention_mask)
         if hasattr(out, "last_hidden_state") and out.last_hidden_state is not None:
             h = out.last_hidden_state
         elif getattr(out, "hidden_states", None):
@@ -104,11 +162,13 @@ class _ModelOutput:
 
 
 def _load_backbone_and_tokenizer(model_name: str):
-    """Prefer Unsloth loader; fall back to transformers AutoModel."""
+    """Load 4-bit weights via Unsloth; always tokenize with text-only Mistral tokenizer."""
+    tokenizer = _load_text_only_tokenizer(model_name)
+
     try:
         from unsloth import FastLanguageModel
 
-        model, tokenizer = FastLanguageModel.from_pretrained(
+        model, _ = FastLanguageModel.from_pretrained(
             model_name,
             max_seq_length=512,
             dtype=None,
@@ -120,10 +180,7 @@ def _load_backbone_and_tokenizer(model_name: str):
     except ImportError:
         pass
 
-    from transformers import AutoModel, AutoTokenizer
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    ensure_padding_token(tokenizer)
+    from transformers import AutoModel
 
     model = AutoModel.from_pretrained(
         model_name,
