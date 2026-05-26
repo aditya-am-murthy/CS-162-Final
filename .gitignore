@@ -4,6 +4,7 @@ data/*
 
 #caches
 **/__pycache__/*
+.cache/
 
 #filetypes
 *.pyc

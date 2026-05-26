@@ -22,7 +22,7 @@ from tqdm import tqdm
 
 from ml_cartography.experiments.uncertainty import spearman_with_human_agreement
 from ml_cartography.utils.io import read_jsonl
-from scripts.common import add_wandb_args, finish_wandb, init_wandb, load_pipeline_config
+from scripts.common import add_wandb_args, finish_wandb, init_wandb, load_pipeline_config, use_wandb
 
 
 def _proxy_agreement(guid: str, confidence: float) -> float:
@@ -69,7 +69,7 @@ def main() -> None:
     drop = [float(r["dropout_uncertainty"]) for r in rows]
     rho_drop, _ = spearmanr(var, drop)
 
-    if not args.no_wandb:
+    if use_wandb(args):
         import wandb
 
         wandb.log(
