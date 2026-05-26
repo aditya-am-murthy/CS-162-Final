@@ -511,7 +511,16 @@ def train_and_collect_dynamics(
         model.save_pretrained(final_dir)
         tokenizer.save_pretrained(final_dir)
 
-    print(f"using device: {device}")
+    if device.type == "cpu":
+        print(
+            "WARNING: training on CPU — very slow. On Colab: T4 runtime + "
+            "scripts/colab_setup.sh (do not pip install -r requirements-train.txt)."
+        )
+    else:
+        try:
+            print(f"using device: {device} ({torch.cuda.get_device_name(0)})")
+        except Exception:
+            print(f"using device: {device}")
     summary = {
         "device": str(device),
         "model_name": cfg.model_name,

@@ -81,11 +81,14 @@ python scripts/06_ambiguous_ablation.py
 
 ### Google Colab (T4)
 
-1. Clone repo, enable **Runtime → T4 GPU**.
-2. Run `bash scripts/colab_setup.sh` (installs deps + optional smoke test).
-3. Add `wandb_credentials.txt` (see `wandb_credentials.example.txt`).
-4. Train all four models: `python scripts/train_all_models.py --max-train-samples 10000 --epochs 5`
-5. Or open `notebooks/colab_train_suite.ipynb` with the Colab extension.
+1. **Runtime → T4 GPU → Restart session** (restart after enabling GPU).
+2. Run `notebooks/colab_train_suite.ipynb` or `bash scripts/colab_setup.sh`.
+3. Verify: `python scripts/check_cuda.py` → `cuda.is_available()=True`.
+
+Do **not** `pip install -r requirements-train.txt` on Colab — it installs **CPU torch** and disables the GPU. Use `requirements-colab.txt` via `colab_setup.sh`. See [docs/COLAB_CUDA.md](docs/COLAB_CUDA.md).
+
+4. Add `wandb_credentials.txt` / `hf_credentials.txt` (see examples).
+5. Train: `python scripts/train_all_models.py --max-train-samples 10000 --epochs 5`
 
 ### Local / SSH with tmux
 
