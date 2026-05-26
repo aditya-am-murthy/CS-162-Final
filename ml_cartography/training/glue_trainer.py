@@ -195,12 +195,37 @@ def _is_prequantized_checkpoint(model_name: str) -> bool:
     return "bnb-4bit" in n or "unsloth" in n and "4bit" in n
 
 
+def ensure_padding_token(tokenizer, model=None) -> None:
+    """Llama/Mistral need pad_token_id on tokenizer + model.config for batch > 1."""
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token or tokenizer.unk_token
+    if getattr(tokenizer, "pad_token_id", None) is None and tokenizer.eos_token_id is not None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+    tokenizer.padding_side = "right"
+    if model is not None and getattr(model, "config", None) is not None:
+        model.config.pad_token_id = tokenizer.pad_token_id
+        if hasattr(model, "model") and hasattr(model.model, "config"):
+            model.model.config.pad_token_id = tokenizer.pad_token_id
+
+
+def resolve_config_hidden_size(config) -> int:
+    if hasattr(config, "hidden_size") and config.hidden_size is not None:
+        return int(config.hidden_size)
+    text_cfg = getattr(config, "text_config", None)
+    if text_cfg is not None and hasattr(text_cfg, "hidden_size"):
+        return int(text_cfg.hidden_size)
+    if hasattr(config, "hidden_sizes") and config.hidden_sizes:
+        return int(config.hidden_sizes[0])
+    raise AttributeError(f"cannot find hidden_size on {type(config).__name__}")
+
+
 def _load_model_and_tokenizer(cfg: TrainConfig, num_labels: int):
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name, use_fast=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    ensure_padding_token(tokenizer)
 
     model_kwargs: Dict = {"num_labels": num_labels}
+    if tokenizer.pad_token_id is not None:
+        model_kwargs["pad_token_id"] = tokenizer.pad_token_id
     if cfg.load_in_4bit and not _is_prequantized_checkpoint(cfg.model_name):
         from transformers import BitsAndBytesConfig
 
@@ -216,6 +241,7 @@ def _load_model_and_tokenizer(cfg: TrainConfig, num_labels: int):
         cfg.model_name,
         **model_kwargs,
     )
+    ensure_padding_token(tokenizer, model)
     if cfg.gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
     return model, tokenizer

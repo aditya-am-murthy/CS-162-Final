@@ -25,6 +25,8 @@ from ml_cartography.training.glue_trainer import (
     _load_snli_rows,
     _resolve_device,
     _train_epoch,
+    ensure_padding_token,
+    resolve_config_hidden_size,
 )
 
 
@@ -112,7 +114,8 @@ def _load_backbone_and_tokenizer(model_name: str):
             dtype=None,
             load_in_4bit=True,
         )
-        hidden = model.config.hidden_size
+        ensure_padding_token(tokenizer, model)
+        hidden = resolve_config_hidden_size(model.config)
         return model, tokenizer, hidden, True
     except ImportError:
         pass
@@ -120,17 +123,15 @@ def _load_backbone_and_tokenizer(model_name: str):
     from transformers import AutoModel, AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token or tokenizer.unk_token
+    ensure_padding_token(tokenizer)
 
     model = AutoModel.from_pretrained(
         model_name,
         device_map="auto",
         trust_remote_code=True,
     )
-    hidden = getattr(model.config, "hidden_size", None) or getattr(
-        model.config, "text_config", model.config
-    ).hidden_size
+    ensure_padding_token(tokenizer, model)
+    hidden = resolve_config_hidden_size(model.config)
     return model, tokenizer, hidden, True
 
 
