@@ -110,11 +110,25 @@ class _SnliTextDataset(Dataset):
         }
 
 
+def _backbone_param_device(backbone: nn.Module) -> torch.device:
+    try:
+        return next(backbone.parameters()).device
+    except StopIteration:
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _align_classifier_to_backbone(wrapper: "SnliClassifierWrapper") -> None:
+    """4-bit Unsloth models skip .to(device); the new Linear head must match backbone GPU."""
+    dev = _backbone_param_device(wrapper.backbone)
+    wrapper.classifier.to(device=dev)
+
+
 class SnliClassifierWrapper(nn.Module):
     def __init__(self, backbone: nn.Module, hidden_size: int, num_labels: int = 3):
         super().__init__()
         self.backbone = backbone
         self.classifier = nn.Linear(hidden_size, num_labels)
+        _align_classifier_to_backbone(self)
 
     def _forward_backbone(self, input_ids, attention_mask):
         bb = self.backbone
@@ -150,7 +164,10 @@ class SnliClassifierWrapper(nn.Module):
         else:
             pooled = h[:, -1, :]
 
+        pooled = pooled.to(device=self.classifier.weight.device).float()
         logits = self.classifier(pooled)
+        if labels is not None:
+            labels = labels.to(logits.device)
         loss = F.cross_entropy(logits, labels) if labels is not None else None
         return _ModelOutput(loss=loss, logits=logits)
 
@@ -255,6 +272,9 @@ def train_and_collect_dynamics_ministral3(
     model = SnliClassifierWrapper(backbone, hidden_size, num_labels=3)
     if not quantized:
         model.to(device)
+    else:
+        _align_classifier_to_backbone(model)
+    print(f"ministral3_snli: backbone on {_backbone_param_device(backbone)}, classifier on {model.classifier.weight.device}")
 
     train_ds = _SnliTextDataset(train_rows, tokenizer, cfg.max_length)
     val_ds = _SnliTextDataset(val_rows, tokenizer, cfg.max_length)
