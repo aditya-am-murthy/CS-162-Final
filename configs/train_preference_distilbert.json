@@ -1,0 +1,8 @@
+{
+  "task": "preference",
+  "model_name": "distilbert-base-uncased",
+  "epochs": 5,
+  "batch_size": 16,
+  "max_train_samples": 5000,
+  "learning_rate": 2e-5
+}

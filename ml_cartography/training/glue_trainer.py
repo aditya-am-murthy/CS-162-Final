@@ -5,15 +5,23 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from tqdm import tqdm
 from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
     get_linear_schedule_with_warmup,
+)
+
+from ml_cartography.training.dynamic_cartography import (
+    append_training_metric,
+    curriculum_weights_from_coordinates,
+    guid_weights_to_sample_weights,
+    records_to_coordinates,
+    save_snapshot,
 )
 
 
@@ -34,6 +42,16 @@ class TrainConfig:
     output_logs: Path = Path("data/raw/epoch_predictions_trained.jsonl")
     checkpoint_dir: Optional[Path] = None
     subset_guids: Optional[Set[str]] = None
+    # dynamic maps (Idea #2)
+    dynamic_snapshots: bool = True
+    snapshot_dir: Optional[Path] = None
+    curriculum_after_epoch: int = 0
+    curriculum_ambiguous_boost: float = 2.5
+    curriculum_easy_scale: float = 0.4
+    # colab / large causal models
+    load_in_4bit: bool = False
+    gradient_checkpointing: bool = False
+    gradient_accumulation_steps: int = 1
 
 
 class NliDataset(Dataset):
@@ -61,6 +79,62 @@ class NliDataset(Dataset):
             "labels": torch.tensor(row["label"], dtype=torch.long),
             "guid": row["guid"],
         }
+
+
+MODEL_PRESETS = {
+    "distilbert": "distilbert-base-uncased",
+    "roberta-base": "roberta-base",
+    "roberta-large": "roberta-large",
+    "bert-base": "bert-base-uncased",
+    "llama-3.2-1b": "meta-llama/Llama-3.2-1B",
+    "ministral-3b": "unsloth/Ministral-3-3B-Base-2512-unsloth-bnb-4bit",
+    # legacy alias
+    "mistral-7b": "unsloth/Ministral-3-3B-Base-2512-unsloth-bnb-4bit",
+}
+
+# colab T4 friendly defaults per preset
+PRESET_DEFAULTS: Dict[str, Dict] = {
+    "distilbert": {"batch_size": 32, "max_length": 128, "load_in_4bit": False},
+    "roberta-base": {"batch_size": 16, "max_length": 128, "load_in_4bit": False},
+    "llama-3.2-1b": {
+        "batch_size": 4,
+        "max_length": 256,
+        "load_in_4bit": True,
+        "gradient_checkpointing": True,
+        "gradient_accumulation_steps": 4,
+        "learning_rate": 1e-5,
+    },
+    "ministral-3b": {
+        "batch_size": 4,
+        "max_length": 256,
+        "load_in_4bit": False,
+        "gradient_checkpointing": True,
+        "gradient_accumulation_steps": 4,
+        "learning_rate": 1e-5,
+    },
+    "mistral-7b": {
+        "batch_size": 4,
+        "max_length": 256,
+        "load_in_4bit": False,
+        "gradient_checkpointing": True,
+        "gradient_accumulation_steps": 4,
+        "learning_rate": 1e-5,
+    },
+}
+
+
+def apply_preset_defaults(cfg: TrainConfig, preset: Optional[str]) -> TrainConfig:
+    if not preset or preset not in PRESET_DEFAULTS:
+        return cfg
+    defaults = PRESET_DEFAULTS[preset]
+    for key, val in defaults.items():
+        if not hasattr(cfg, key):
+            continue
+        current = getattr(cfg, key)
+        # only override generic constructor defaults for large-model keys
+        if key in ("batch_size", "max_length", "load_in_4bit", "gradient_checkpointing", "gradient_accumulation_steps", "learning_rate"):
+            setattr(cfg, key, val)
+    return cfg
 
 
 def _load_snli_rows(
@@ -116,6 +190,65 @@ def _resolve_device() -> torch.device:
     return torch.device("cpu")
 
 
+def _is_prequantized_checkpoint(model_name: str) -> bool:
+    n = model_name.lower()
+    return "bnb-4bit" in n or "unsloth" in n and "4bit" in n
+
+
+def _load_model_and_tokenizer(cfg: TrainConfig, num_labels: int):
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model_name, use_fast=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model_kwargs: Dict = {"num_labels": num_labels}
+    if cfg.load_in_4bit and not _is_prequantized_checkpoint(cfg.model_name):
+        from transformers import BitsAndBytesConfig
+
+        model_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+        )
+        model_kwargs["device_map"] = "auto"
+
+    model = AutoModelForSequenceClassification.from_pretrained(
+        cfg.model_name,
+        **model_kwargs,
+    )
+    if cfg.gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
+        model.gradient_checkpointing_enable()
+    return model, tokenizer
+
+
+def _build_train_loader(
+    train_ds: NliDataset,
+    cfg: TrainConfig,
+    sample_weights: Optional[List[float]],
+    device: torch.device,
+) -> DataLoader:
+    if sample_weights is not None:
+        sampler = WeightedRandomSampler(
+            weights=torch.tensor(sample_weights, dtype=torch.double),
+            num_samples=len(sample_weights),
+            replacement=True,
+        )
+        return DataLoader(
+            train_ds,
+            batch_size=cfg.batch_size,
+            sampler=sampler,
+            num_workers=0,
+            pin_memory=device.type == "cuda",
+        )
+    return DataLoader(
+        train_ds,
+        batch_size=cfg.batch_size,
+        shuffle=True,
+        num_workers=0,
+        pin_memory=device.type == "cuda",
+    )
+
+
 def _train_epoch(
     model,
     loader: DataLoader,
@@ -124,16 +257,17 @@ def _train_epoch(
     device: torch.device,
     scaler: Optional[torch.cuda.amp.GradScaler],
     epoch: int,
+    grad_accum: int = 1,
 ) -> float:
     model.train()
     total_loss = 0.0
     n_batches = 0
+    optimizer.zero_grad(set_to_none=True)
 
-    for batch in tqdm(loader, desc=f"train epoch {epoch}", leave=False):
+    for step, batch in enumerate(tqdm(loader, desc=f"train epoch {epoch}", leave=False)):
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         labels = batch["labels"].to(device)
-        optimizer.zero_grad(set_to_none=True)
 
         if scaler is not None:
             with torch.cuda.amp.autocast():
@@ -142,22 +276,27 @@ def _train_epoch(
                     attention_mask=attention_mask,
                     labels=labels,
                 )
-                loss = out.loss
+                loss = out.loss / grad_accum
             scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
         else:
             out = model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 labels=labels,
             )
-            loss = out.loss
+            loss = out.loss / grad_accum
             loss.backward()
-            optimizer.step()
 
-        scheduler.step()
-        total_loss += float(loss.item())
+        if (step + 1) % grad_accum == 0:
+            if scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            scheduler.step()
+
+        total_loss += float(loss.item()) * grad_accum
         n_batches += 1
 
     return total_loss / max(n_batches, 1)
@@ -217,19 +356,28 @@ def _evaluate_accuracy(model, loader: DataLoader, device: torch.device) -> float
 def train_and_collect_dynamics(
     cfg: TrainConfig,
     wandb_run=None,
+    metrics_log: Optional[Path] = None,
 ) -> Dict:
     """
     Fine-tune on SNLI (train split), log gold-label probability after each epoch.
-
-    Returns summary dict with paths and final validation accuracy.
+    Optional dynamic snapshots + curriculum reweighting (Idea #2).
     """
     if cfg.dataset.lower() != "snli":
-        raise ValueError("only dataset=snli is implemented; more can be added later")
+        raise ValueError("only dataset=snli is implemented in glue_trainer")
+
+    from ml_cartography.training.ministral3_snli import (
+        is_ministral3_model,
+        train_and_collect_dynamics_ministral3,
+    )
+
+    if is_ministral3_model(cfg.model_name):
+        return train_and_collect_dynamics_ministral3(cfg, wandb_run, metrics_log)
 
     torch.manual_seed(cfg.seed)
     device = _resolve_device()
-    use_fp16 = cfg.fp16 and device.type == "cuda"
+    use_fp16 = cfg.fp16 and device.type == "cuda" and not cfg.load_in_4bit
     scaler = torch.cuda.amp.GradScaler() if use_fp16 else None
+    grad_accum = max(1, cfg.gradient_accumulation_steps)
 
     train_rows = _load_snli_rows(
         "train",
@@ -247,21 +395,12 @@ def train_and_collect_dynamics(
         raise ValueError("no training examples after filtering; check subset guids")
 
     num_labels = 3
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model_name, use_fast=True)
-    model = AutoModelForSequenceClassification.from_pretrained(
-        cfg.model_name, num_labels=num_labels
-    )
-    model.to(device)
+    model, tokenizer = _load_model_and_tokenizer(cfg, num_labels)
+    if not cfg.load_in_4bit:
+        model.to(device)
 
     train_ds = NliDataset(train_rows, tokenizer, cfg.max_length)
     val_ds = NliDataset(val_rows, tokenizer, cfg.max_length)
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=cfg.batch_size,
-        shuffle=True,
-        num_workers=0,
-        pin_memory=device.type == "cuda",
-    )
     val_loader = DataLoader(
         val_ds,
         batch_size=cfg.eval_batch_size,
@@ -277,19 +416,37 @@ def train_and_collect_dynamics(
         pin_memory=device.type == "cuda",
     )
 
-    total_steps = len(train_loader) * cfg.epochs
-    warmup_steps = int(total_steps * cfg.warmup_ratio)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.learning_rate)
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer, warmup_steps, total_steps
-    )
+    train_guids = [r["guid"] for r in train_rows]
+    sample_weights: Optional[List[float]] = None
+    snapshot_dir = cfg.snapshot_dir
+    if snapshot_dir:
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
 
     cfg.output_logs.parent.mkdir(parents=True, exist_ok=True)
     all_records: List[Dict] = []
+    snapshot_paths: List[Tuple[int, Path]] = []
 
     for epoch in range(1, cfg.epochs + 1):
+        train_loader = _build_train_loader(train_ds, cfg, sample_weights, device)
+        total_steps = (len(train_loader) // grad_accum) * (cfg.epochs - epoch + 1)
+        warmup_steps = int(total_steps * cfg.warmup_ratio)
+        optimizer = torch.optim.AdamW(
+            [p for p in model.parameters() if p.requires_grad],
+            lr=cfg.learning_rate,
+        )
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer, warmup_steps, max(total_steps, 1)
+        )
+
         train_loss = _train_epoch(
-            model, train_loader, optimizer, scheduler, device, scaler, epoch
+            model,
+            train_loader,
+            optimizer,
+            scheduler,
+            device,
+            scaler,
+            epoch,
+            grad_accum=grad_accum,
         )
         val_acc = _evaluate_accuracy(model, val_loader, device)
         epoch_records = _collect_epoch_predictions(
@@ -297,18 +454,32 @@ def train_and_collect_dynamics(
         )
         all_records.extend(epoch_records)
 
+        if cfg.dynamic_snapshots and snapshot_dir:
+            coords = records_to_coordinates(all_records, max_epoch=epoch)
+            snap_path = save_snapshot(coords, snapshot_dir, epoch)
+            snapshot_paths.append((epoch, snap_path))
+
+        metric_row = {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "val_accuracy": val_acc,
+            "num_prediction_rows": len(epoch_records),
+        }
+        if metrics_log:
+            append_training_metric(metrics_log, metric_row)
+
         if wandb_run is not None:
             import wandb
 
-            wandb.log(
-                {
-                    "epoch": epoch,
-                    "train_loss": train_loss,
-                    "val_accuracy": val_acc,
-                    "num_prediction_rows": len(epoch_records),
-                },
-                step=epoch,
-            )
+            log_payload = dict(metric_row)
+            if snapshot_dir and (snapshot_dir / f"epoch_{epoch:03d}_coordinates.jsonl").is_file():
+                from ml_cartography.analysis.data_map import save_data_map_plot
+
+                plot_path = snapshot_dir / f"epoch_{epoch:03d}_data_map.png"
+                coords = records_to_coordinates(all_records, max_epoch=epoch)
+                save_data_map_plot(coords, plot_path)
+                log_payload[f"data_map_epoch_{epoch}"] = wandb.Image(str(plot_path))
+            wandb.log(log_payload, step=epoch)
 
         if cfg.checkpoint_dir:
             ckpt = cfg.checkpoint_dir / f"epoch-{epoch}"
@@ -316,9 +487,29 @@ def train_and_collect_dynamics(
             model.save_pretrained(ckpt)
             tokenizer.save_pretrained(ckpt)
 
+        # adaptive curriculum for remaining epochs (Idea #2)
+        if (
+            cfg.curriculum_after_epoch > 0
+            and epoch >= cfg.curriculum_after_epoch
+            and epoch < cfg.epochs
+        ):
+            coords = records_to_coordinates(all_records, max_epoch=epoch)
+            guid_w = curriculum_weights_from_coordinates(
+                coords,
+                ambiguous_boost=cfg.curriculum_ambiguous_boost,
+                easy_scale=cfg.curriculum_easy_scale,
+            )
+            sample_weights = guid_weights_to_sample_weights(train_guids, guid_w)
+
     with cfg.output_logs.open("w", encoding="utf-8") as f:
         for row in all_records:
             f.write(json.dumps(row) + "\n")
+
+    if cfg.checkpoint_dir:
+        final_dir = cfg.checkpoint_dir.parent / "final"
+        final_dir.mkdir(parents=True, exist_ok=True)
+        model.save_pretrained(final_dir)
+        tokenizer.save_pretrained(final_dir)
 
     print(f"using device: {device}")
     summary = {
@@ -330,13 +521,7 @@ def train_and_collect_dynamics(
         "final_val_accuracy": _evaluate_accuracy(model, val_loader, device),
         "output_logs": str(cfg.output_logs),
         "num_log_rows": len(all_records),
+        "snapshot_dir": str(snapshot_dir) if snapshot_dir else None,
+        "num_snapshots": len(snapshot_paths),
     }
     return summary
-
-
-MODEL_PRESETS = {
-    "distilbert": "distilbert-base-uncased",
-    "roberta-base": "roberta-base",
-    "roberta-large": "roberta-large",
-    "bert-base": "bert-base-uncased",
-}

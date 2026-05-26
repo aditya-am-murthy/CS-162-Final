@@ -79,38 +79,61 @@ python scripts/06_ambiguous_ablation.py
 
 ## GPU training (real dynamics)
 
-Fine-tune on **SNLI** and write per-epoch logs the cartography pipeline expects:
+### Google Colab (T4)
+
+1. Clone repo, enable **Runtime → T4 GPU**.
+2. Run `bash scripts/colab_setup.sh` (installs deps + optional smoke test).
+3. Add `wandb_credentials.txt` (see `wandb_credentials.example.txt`).
+4. Train all four models: `python scripts/train_all_models.py --max-train-samples 10000 --epochs 5`
+5. Or open `notebooks/colab_train_suite.ipynb` with the Colab extension.
+
+### Local / SSH with tmux
+
+```bash
+bash scripts/tmux_train_suite.sh   # one window per model
+# or sequential:
+python scripts/train_all_models.py --epochs 5
+```
+
+### Single experiment (recommended)
+
+Writes dynamics, **dynamic epoch snapshots**, data-map PNGs, and copies everything to `results/<timestamp>_<task>_<preset>/`:
 
 ```bash
 conda activate cs162-cartography
 pip install -r requirements-train.txt
-# CUDA example (pick matching wheel from https://pytorch.org):
-# pip install torch --index-url https://download.pytorch.org/whl/cu124
 
-# fast (~minutes on one GPU): DistilBERT, 20k examples
-python scripts/train_and_collect_dynamics.py --preset distilbert --max-train-samples 20000 --epochs 5
+# SNLI + dynamic curriculum (Idea #2)
+python scripts/run_cartography_experiment.py --task dynamic --preset distilbert --epochs 5
 
-# larger: RoBERTa-base, 50k examples (use smaller batch if OOM)
-python scripts/train_and_collect_dynamics.py --config configs/train_snli_roberta_base.json
+# Preference Data Maps — UltraFeedback / synthetic (Idea #1)
+python scripts/run_cartography_experiment.py --task preference --preset distilbert --max-train-samples 3000
 
-# then cartography on *trained* logs (not toy synthetic)
-python scripts/01_collect_dynamics.py --input data/raw/epoch_predictions_snli_distilbert.jsonl
-python scripts/02_build_data_map.py --input data/processed/cartography_coordinates.jsonl
-python scripts/07_generate_insight_figures.py --input data/processed/cartography_with_regions.jsonl
+# Instruction-tuning dynamics — Alpaca (Idea #1)
+python scripts/run_cartography_experiment.py --task instruction --preset distilbert --max-train-samples 2000
 ```
 
-| Preset | Model | VRAM (rough) | Notes |
-|--------|--------|--------------|--------|
-| `distilbert` | DistilBERT | ~4–6 GB | Best default for 1 GPU |
-| `roberta-base` | RoBERTa-base | ~8–12 GB | Paper-like, smaller than large |
-| `roberta-large` | RoBERTa-large | ~24 GB+ | Paper default; reduce batch / samples |
-
-Train on a **cartography subset** (after steps 01–03 on full trained logs):
+Legacy one-shot trainer (logs only, no timestamped `results/`):
 
 ```bash
-python scripts/train_and_collect_dynamics.py --preset distilbert \\
-  --subset-file data/processed/selected_high_variability_33pct.jsonl \\
-  --output data/raw/epoch_predictions_subset_ambiguous.jsonl
+python scripts/train_and_collect_dynamics.py --preset distilbert --max-train-samples 20000 --epochs 5
 ```
 
-Use `--max-train-samples 0` for the full SNLI train split (~550k; slow). Paper uses RoBERTa-**large** for 5–6 epochs; this repo supports smaller models for coursework GPUs.
+| Preset | Model | Colab T4 | Notes |
+|--------|--------|----------|--------|
+| `distilbert` | DistilBERT | yes | Fastest smoke test |
+| `roberta-base` | RoBERTa-base | yes | Paper-like encoder |
+| `llama-3.2-1b` | Llama 3.2 1B | yes (4-bit) | Accept [HF license](https://huggingface.co/meta-llama/Llama-3.2-1B) |
+| `ministral-3b` | Unsloth Ministral 3 3B 4-bit | yes (~8GB) | `configs/train_snli_mistral.json` |
+
+**Hugging Face:** see [docs/HUGGINGFACE_SETUP.md](docs/HUGGINGFACE_SETUP.md) — token + gated Llama acceptance.
+
+### Results layout (Streamlit-ready)
+
+- `results/report.md` — constant project report (this file stays at the root).
+- `results/<YYYYMMDD_HHMMSS>_<task>_<preset>/` — per-run artifacts: `dynamics/`, `figures/`, `models/`, `manifest.json`.
+- `results/runs_index.json` — index of baseline / migrated runs.
+
+High-variability preference/SNLI subsets for DPO-style training are exported to `dynamics/subset_high_variability.jsonl` inside each run folder.
+
+Use `--max-train-samples 0` for the full SNLI train split (~550k; slow).

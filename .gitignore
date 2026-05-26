@@ -1,6 +1,8 @@
 #Directories
 docs/local-docs/*
 data/*
+results/*/*
+results/*.json
 
 #caches
 **/__pycache__/*
@@ -11,6 +13,11 @@ data/*
 
 # secrets
 wandb_credentials.txt
+hf_credentials.txt
 
 # wandb local run cache
 wandb/
+
+# large experiment artifacts (timestamped copies also go to results/<run_id>/)
+experiments/runs/*
+!experiments/runs/.gitkeep
