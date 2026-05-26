@@ -52,6 +52,8 @@ class TrainConfig:
     load_in_4bit: bool = False
     gradient_checkpointing: bool = False
     gradient_accumulation_steps: int = 1
+    # ministral + unsloth 4-bit: full backbone FT often dtype/checkpoint errors on T4
+    ministral_freeze_backbone: bool = True
 
 
 class NliDataset(Dataset):

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 from typing import Dict, List, Optional
+
+_nullcontext = contextlib.nullcontext
 
 import torch
 import torch.nn as nn
@@ -117,18 +120,50 @@ def _backbone_param_device(backbone: nn.Module) -> torch.device:
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def _backbone_compute_dtype(backbone: nn.Module) -> torch.dtype:
+    for p in backbone.parameters():
+        if p.dtype.is_floating_point:
+            return p.dtype
+    return torch.bfloat16 if torch.cuda.is_available() else torch.float32
+
+
+def _prepare_backbone_for_snli(backbone: nn.Module, freeze: bool) -> None:
+    if hasattr(backbone, "gradient_checkpointing_disable"):
+        backbone.gradient_checkpointing_disable()
+    if hasattr(backbone, "config") and hasattr(backbone.config, "use_cache"):
+        backbone.config.use_cache = False
+    if freeze:
+        for p in backbone.parameters():
+            p.requires_grad = False
+        backbone.eval()
+
+
 def _align_classifier_to_backbone(wrapper: "SnliClassifierWrapper") -> None:
-    """4-bit Unsloth models skip .to(device); the new Linear head must match backbone GPU."""
+    """4-bit Unsloth: head must match backbone device + compute dtype (bf16/fp16)."""
     dev = _backbone_param_device(wrapper.backbone)
-    wrapper.classifier.to(device=dev)
+    dtype = _backbone_compute_dtype(wrapper.backbone)
+    wrapper.classifier.to(device=dev, dtype=dtype)
 
 
 class SnliClassifierWrapper(nn.Module):
-    def __init__(self, backbone: nn.Module, hidden_size: int, num_labels: int = 3):
+    def __init__(
+        self,
+        backbone: nn.Module,
+        hidden_size: int,
+        num_labels: int = 3,
+        freeze_backbone: bool = True,
+    ):
         super().__init__()
         self.backbone = backbone
+        self.freeze_backbone = freeze_backbone
         self.classifier = nn.Linear(hidden_size, num_labels)
         _align_classifier_to_backbone(self)
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.freeze_backbone:
+            self.backbone.eval()
+        return self
 
     def _forward_backbone(self, input_ids, attention_mask):
         bb = self.backbone
@@ -150,7 +185,9 @@ class SnliClassifierWrapper(nn.Module):
         return bb(**kwargs)
 
     def forward(self, input_ids, attention_mask=None, labels=None, **kwargs):
-        out = self._forward_backbone(input_ids, attention_mask)
+        ctx = torch.no_grad() if self.freeze_backbone else _nullcontext()
+        with ctx:
+            out = self._forward_backbone(input_ids, attention_mask)
         if hasattr(out, "last_hidden_state") and out.last_hidden_state is not None:
             h = out.last_hidden_state
         elif getattr(out, "hidden_states", None):
@@ -158,18 +195,24 @@ class SnliClassifierWrapper(nn.Module):
         else:
             raise RuntimeError("backbone did not return hidden states; check model class")
 
+        if self.freeze_backbone:
+            h = h.detach()
+
         if attention_mask is not None:
-            mask = attention_mask.unsqueeze(-1).float()
+            mask = attention_mask.unsqueeze(-1).to(dtype=h.dtype)
             pooled = (h * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-6)
         else:
             pooled = h[:, -1, :]
 
-        pooled = pooled.to(device=self.classifier.weight.device).float()
+        pooled = pooled.to(
+            device=self.classifier.weight.device,
+            dtype=self.classifier.weight.dtype,
+        )
         logits = self.classifier(pooled)
         if labels is not None:
             labels = labels.to(logits.device)
-        loss = F.cross_entropy(logits, labels) if labels is not None else None
-        return _ModelOutput(loss=loss, logits=logits)
+        loss = F.cross_entropy(logits.float(), labels) if labels is not None else None
+        return _ModelOutput(loss=loss, logits=logits.float())
 
 
 class _ModelOutput:
@@ -193,7 +236,7 @@ def _load_backbone_and_tokenizer(model_name: str):
         )
         ensure_padding_token(tokenizer, model)
         hidden = resolve_config_hidden_size(model.config)
-        return model, tokenizer, hidden, True
+        return model, tokenizer, hidden, True, "unsloth"
     except ImportError:
         pass
 
@@ -206,7 +249,7 @@ def _load_backbone_and_tokenizer(model_name: str):
     )
     ensure_padding_token(tokenizer, model)
     hidden = resolve_config_hidden_size(model.config)
-    return model, tokenizer, hidden, True
+    return model, tokenizer, hidden, True, "transformers"
 
 
 @torch.no_grad()
@@ -266,15 +309,24 @@ def train_and_collect_dynamics_ministral3(
     if not train_rows:
         raise ValueError("no training examples after filtering")
 
-    backbone, tokenizer, hidden_size, quantized = _load_backbone_and_tokenizer(
+    backbone, tokenizer, hidden_size, quantized, _loader = _load_backbone_and_tokenizer(
         cfg.model_name
     )
-    model = SnliClassifierWrapper(backbone, hidden_size, num_labels=3)
+    freeze_bb = cfg.ministral_freeze_backbone
+    _prepare_backbone_for_snli(backbone, freeze=freeze_bb)
+    model = SnliClassifierWrapper(
+        backbone, hidden_size, num_labels=3, freeze_backbone=freeze_bb
+    )
     if not quantized:
         model.to(device)
     else:
         _align_classifier_to_backbone(model)
-    print(f"ministral3_snli: backbone on {_backbone_param_device(backbone)}, classifier on {model.classifier.weight.device}")
+    mode = "frozen backbone + trainable head" if freeze_bb else "full finetune"
+    print(
+        f"ministral3_snli ({mode}): backbone {_backbone_param_device(backbone)} "
+        f"{_backbone_compute_dtype(backbone)}, classifier {model.classifier.weight.device} "
+        f"{model.classifier.weight.dtype}"
+    )
 
     train_ds = _SnliTextDataset(train_rows, tokenizer, cfg.max_length)
     val_ds = _SnliTextDataset(val_rows, tokenizer, cfg.max_length)
@@ -294,10 +346,10 @@ def train_and_collect_dynamics_ministral3(
 
     for epoch in range(1, cfg.epochs + 1):
         train_loader = _build_train_loader(train_ds, cfg, sample_weights, device)
-        optimizer = torch.optim.AdamW(
-            [p for p in model.parameters() if p.requires_grad],
-            lr=cfg.learning_rate,
-        )
+        train_params = [p for p in model.classifier.parameters() if p.requires_grad]
+        if not freeze_bb:
+            train_params = [p for p in model.parameters() if p.requires_grad]
+        optimizer = torch.optim.AdamW(train_params, lr=cfg.learning_rate)
         from torch.optim.lr_scheduler import LambdaLR
 
         scheduler = LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
