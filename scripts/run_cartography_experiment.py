@@ -23,6 +23,10 @@ _root = Path(__file__).resolve().parents[1]
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
+from scripts.common import load_hf_credentials
+
+load_hf_credentials()
+
 # unsloth must import before transformers (ministral-3b preset)
 try:
     import unsloth  # noqa: F401
@@ -62,7 +66,7 @@ from ml_cartography.training.preference_trainer import (
     train_and_collect_preference_dynamics,
 )
 from ml_cartography.utils.io import read_jsonl, write_jsonl
-from scripts.common import add_wandb_args, finish_wandb, init_wandb, load_hf_credentials
+from scripts.common import add_wandb_args, finish_wandb, init_wandb
 
 
 def _collect_dynamics_from_logs(log_path: Path) -> list[dict]:
@@ -129,7 +133,6 @@ def main() -> None:
     parser.add_argument("--no-4bit", action="store_true", help="Disable 4-bit loading for large models")
     add_wandb_args(parser)
     args = parser.parse_args()
-    load_hf_credentials()
 
     model_name = args.model_name or MODEL_PRESETS[args.preset]
     task_slug = f"{args.task}_{args.preset}"

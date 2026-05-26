@@ -1,0 +1,22 @@
+{
+  "started_at": "2026-05-26T21:46:04",
+  "smoke": [
+    {
+      "phase": "smoke",
+      "label": "distilbert_snli",
+      "returncode": 0
+    },
+    {
+      "phase": "smoke",
+      "label": "llama_mini",
+      "returncode": 0
+    },
+    {
+      "phase": "smoke",
+      "label": "ministral_mini",
+      "returncode": 0
+    }
+  ],
+  "train": [],
+  "finished_at": "2026-05-26T21:46:04"
+}

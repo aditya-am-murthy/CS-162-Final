@@ -1,0 +1,18 @@
+{
+  "description": "Default settings for scripts/train_suite.py",
+  "epochs": 5,
+  "max_train_samples": 20000,
+  "max_eval_samples": 2000,
+  "map_interval": 1,
+  "dynamic_cartography": true,
+  "preference_samples": 4000,
+  "instruction_samples": 4000,
+  "jobs": [
+    "snli_distilbert",
+    "snli_roberta_base",
+    "snli_llama_3_2_1b",
+    "snli_mistral_7b",
+    "preference_ultrafeedback",
+    "instruction_alpaca"
+  ]
+}
