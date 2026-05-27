@@ -95,6 +95,24 @@ SMOKE_JOBS: List[Dict[str, Any]] = [
 ]
 
 
+def _check_train_deps() -> None:
+    """Llama (4-bit) and Ministral (Unsloth bnb-4bit) need bitsandbytes + unsloth."""
+    try:
+        import bitsandbytes  # noqa: F401
+    except ImportError as e:
+        raise RuntimeError(
+            "bitsandbytes is required for llama-3.2-1b and ministral-3b. "
+            "Install with: pip install -U 'bitsandbytes>=0.46.1'"
+        ) from e
+    try:
+        import unsloth  # noqa: F401
+    except ImportError as e:
+        raise RuntimeError(
+            "unsloth is required for ministral-3b (Unsloth 4-bit checkpoint). "
+            "Install with: pip install unsloth"
+        ) from e
+
+
 def _check_gpus(required: int = NUM_TRAIN_GPUS) -> None:
     if not torch.cuda.is_available():
         raise RuntimeError(
@@ -493,6 +511,7 @@ def main() -> None:
         sys.exit(_worker_train_presets(args.gpu_id, args.presets, args))
 
     _check_gpus(required=NUM_TRAIN_GPUS)
+    _check_train_deps()
 
     summary_path = _root / "experiments" / "dual_gpu_train_suite_summary.json"
     summary: Dict[str, Any] = {"started_at": time.strftime("%Y-%m-%dT%H:%M:%S")}

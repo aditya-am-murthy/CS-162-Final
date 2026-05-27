@@ -227,29 +227,21 @@ def _load_backbone_and_tokenizer(model_name: str):
 
     try:
         from unsloth import FastLanguageModel
+    except ImportError as e:
+        raise ImportError(
+            "ministral-3b requires unsloth to load the Unsloth 4-bit checkpoint. "
+            "Install with: pip install unsloth"
+        ) from e
 
-        model, _ = FastLanguageModel.from_pretrained(
-            model_name,
-            max_seq_length=512,
-            dtype=None,
-            load_in_4bit=True,
-        )
-        ensure_padding_token(tokenizer, model)
-        hidden = resolve_config_hidden_size(model.config)
-        return model, tokenizer, hidden, True, "unsloth"
-    except ImportError:
-        pass
-
-    from transformers import AutoModel
-
-    model = AutoModel.from_pretrained(
+    model, _ = FastLanguageModel.from_pretrained(
         model_name,
-        device_map="auto",
-        trust_remote_code=True,
+        max_seq_length=512,
+        dtype=None,
+        load_in_4bit=True,
     )
     ensure_padding_token(tokenizer, model)
     hidden = resolve_config_hidden_size(model.config)
-    return model, tokenizer, hidden, True, "transformers"
+    return model, tokenizer, hidden, True, "unsloth"
 
 
 @torch.no_grad()
