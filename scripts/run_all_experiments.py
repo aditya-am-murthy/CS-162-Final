@@ -15,7 +15,7 @@ if str(_root) not in sys.path:
 
 from tqdm import tqdm
 
-from scripts.common import add_wandb_args, finish_wandb, init_wandb
+from scripts.common import add_wandb_args, finish_wandb, init_wandb, use_wandb
 
 # (name, script, extra_args, use_config)
 PIPELINE_STEPS = [
@@ -73,7 +73,7 @@ def main() -> None:
         print(f"\n=== {name} ===")
         _run_step(script, step_args, wandb_args, repo_root)
 
-    if not args.no_wandb:
+    if use_wandb(args):
         import wandb
 
         wandb.log({"pipeline_status": "completed"})

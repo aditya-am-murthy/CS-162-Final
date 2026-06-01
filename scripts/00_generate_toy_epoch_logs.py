@@ -15,7 +15,7 @@ import json
 import random
 from tqdm import tqdm
 
-from scripts.common import add_wandb_args, finish_wandb, init_wandb
+from scripts.common import add_wandb_args, finish_wandb, init_wandb, use_wandb
 
 
 def _profile_for_kind(kind: str, rng: random.Random) -> tuple[float, float]:
@@ -93,7 +93,7 @@ def main() -> None:
         for row in tqdm(rows, desc="writing jsonl"):
             f.write(json.dumps(row) + "\n")
 
-    if not args.no_wandb:
+    if use_wandb(args):
         import wandb
 
         wandb.log(

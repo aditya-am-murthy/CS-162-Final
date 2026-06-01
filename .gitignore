@@ -6,6 +6,7 @@ results/*.json
 
 #caches
 **/__pycache__/*
+.cache/
 
 #filetypes
 *.pyc

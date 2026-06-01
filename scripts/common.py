@@ -13,7 +13,15 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-import wandb
+_CACHE_DIR = _REPO_ROOT / ".cache"
+_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", str(_CACHE_DIR / "matplotlib"))
+os.environ.setdefault("XDG_CACHE_HOME", str(_CACHE_DIR))
+
+try:
+    import wandb
+except ImportError:  # pragma: no cover - optional dependency for local runs
+    wandb = None
 
 DEFAULT_CREDENTIALS_PATH = _REPO_ROOT / "wandb_credentials.txt"
 DEFAULT_HF_CREDENTIALS_PATH = _REPO_ROOT / "hf_credentials.txt"
@@ -147,7 +155,7 @@ def init_wandb(
     job_type: str,
     config: Optional[Dict[str, Any]] = None,
 ) -> Optional[wandb.sdk.wandb_run.Run]:
-    if getattr(args, "no_wandb", False):
+    if not use_wandb(args):
         return None
 
     creds_path = getattr(args, "wandb_credentials", DEFAULT_CREDENTIALS_PATH)
@@ -166,5 +174,9 @@ def init_wandb(
 
 
 def finish_wandb() -> None:
-    if wandb.run is not None:
+    if wandb is not None and wandb.run is not None:
         wandb.finish()
+
+
+def use_wandb(args: argparse.Namespace) -> bool:
+    return (not getattr(args, "no_wandb", False)) and wandb is not None

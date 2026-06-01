@@ -21,7 +21,7 @@ from tqdm import tqdm
 
 from ml_cartography.core.dynamics import add_epoch_observation, build_record, summarize_record
 from ml_cartography.utils.io import read_jsonl, write_jsonl
-from scripts.common import add_wandb_args, finish_wandb, init_wandb, load_pipeline_config
+from scripts.common import add_wandb_args, finish_wandb, init_wandb, load_pipeline_config, use_wandb
 
 
 def collect_dynamics(input_path: Path) -> list[dict]:
@@ -62,7 +62,7 @@ def main() -> None:
     confidences = [float(r["confidence"]) for r in coordinates]
     variabilities = [float(r["variability"]) for r in coordinates]
 
-    if not args.no_wandb:
+    if use_wandb(args):
         import wandb
 
         wandb.log(

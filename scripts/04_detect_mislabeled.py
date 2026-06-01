@@ -26,7 +26,7 @@ from ml_cartography.experiments.noise_detection import (
 )
 from ml_cartography.experiments.noise_injection import inject_label_noise
 from ml_cartography.utils.io import read_jsonl, write_jsonl
-from scripts.common import add_wandb_args, finish_wandb, init_wandb, load_pipeline_config
+from scripts.common import add_wandb_args, finish_wandb, init_wandb, load_pipeline_config, use_wandb
 
 
 def main() -> None:
@@ -72,7 +72,7 @@ def main() -> None:
     clean_preds = model.predict(build_feature_matrix(rows))
     flagged_clean = sum(int(p) == 1 for p in clean_preds)
 
-    if not args.no_wandb:
+    if use_wandb(args):
         import wandb
 
         wandb.log(

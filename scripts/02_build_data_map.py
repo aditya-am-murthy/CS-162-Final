@@ -20,9 +20,9 @@ from collections import Counter
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-from ml_cartography.analysis.data_map import annotate_regions, save_data_map_plot
-from ml_cartography.utils.io import read_jsonl, write_jsonl
-from scripts.common import add_wandb_args, finish_wandb, init_wandb, load_pipeline_config
+from ml_cartography.analysis.data_map import prepare_region_annotations, save_data_map_plot
+from ml_cartography.utils.io import read_jsonl, write_json, write_jsonl
+from scripts.common import add_wandb_args, finish_wandb, init_wandb, load_pipeline_config, use_wandb
 
 
 def _save_histogram(values: list[float], title: str, output_path: Path) -> None:
@@ -43,6 +43,11 @@ def main() -> None:
     parser.add_argument("--input", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--plot-output", type=Path, default=None)
+    parser.add_argument(
+        "--summary-output",
+        type=Path,
+        default=Path("data/processed/data_map_summary.json"),
+    )
     add_wandb_args(parser)
     args = parser.parse_args()
 
@@ -55,12 +60,13 @@ def main() -> None:
     init_wandb(args, job_type="build_data_map", config={"input": str(input_path)})
 
     rows = read_jsonl(input_path)
-    tagged = []
+    copied = []
     for row in tqdm(rows, desc="tagging regions"):
-        tagged.append(dict(row))
-    tagged = annotate_regions(tagged)
+        copied.append(dict(row))
+    tagged, summary = prepare_region_annotations(copied)
     write_jsonl(output_path, tagged)
-    save_data_map_plot(tagged, plot_path)
+    write_json(args.summary_output, summary)
+    save_data_map_plot(tagged, plot_path, thresholds=summary["thresholds"])
 
     conf = [float(r["confidence"]) for r in tagged]
     var = [float(r["variability"]) for r in tagged]
@@ -74,7 +80,7 @@ def main() -> None:
     _save_histogram(var, "Variability distribution", var_hist)
     _save_histogram(corr, "Correctness distribution", corr_hist)
 
-    if not args.no_wandb:
+    if use_wandb(args):
         import wandb
 
         wandb.log(
@@ -84,12 +90,14 @@ def main() -> None:
                 "hist_variability": wandb.Image(str(var_hist)),
                 "hist_correctness": wandb.Image(str(corr_hist)),
                 **{f"region_count/{k}": v for k, v in region_counts.items()},
+                **{f"region_threshold/{k}": v for k, v in summary["thresholds"].items()},
             }
         )
         wandb.save(str(output_path))
 
     print(f"tagged {len(tagged)} examples -> {output_path}")
     print(f"data map -> {plot_path}")
+    print(f"summary -> {args.summary_output}")
     finish_wandb()
 
 

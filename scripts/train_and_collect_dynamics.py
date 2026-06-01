@@ -32,6 +32,7 @@ from ml_cartography.training.glue_trainer import (
     load_guids_from_jsonl,
     train_and_collect_dynamics,
 )
+
 from scripts.common import (
     add_wandb_args,
     finish_wandb,
@@ -139,7 +140,7 @@ def main() -> None:
     print(f"device: will use cuda if available")
     summary = train_and_collect_dynamics(cfg)
 
-    if not args.no_wandb:
+    if use_wandb(args):
         import wandb
 
         wandb.log(summary)

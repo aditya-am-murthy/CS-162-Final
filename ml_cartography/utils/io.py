@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Any, Dict, Iterable, List
 
 
 def ensure_parent_dir(path: Path) -> None:
@@ -29,6 +29,18 @@ def write_jsonl(path: Path, rows: Iterable[Dict]) -> None:
             f.write(json.dumps(row) + "\n")
 
 
+def read_json(path: Path) -> Dict[str, Any]:
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def write_json(path: Path, payload: Dict[str, Any]) -> None:
+    ensure_parent_dir(path)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+        f.write("\n")
+
+
 def read_csv_rows(path: Path) -> List[Dict]:
     with path.open("r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
@@ -41,4 +53,3 @@ def write_csv_rows(path: Path, rows: List[Dict], fieldnames: List[str]) -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
-
