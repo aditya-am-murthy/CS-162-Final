@@ -1,0 +1,8 @@
+# Colab / GPU notebook deps — do NOT list torch here.
+# Colab ships a CUDA build; pip install torch from PyPI replaces it with +cpu.
+transformers>=4.38.0
+datasets>=2.17.0
+accelerate>=0.27.0
+bitsandbytes>=0.43.0
+peft>=0.10.0
+huggingface_hub>=0.23.0

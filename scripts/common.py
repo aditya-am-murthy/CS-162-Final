@@ -24,6 +24,67 @@ except ImportError:  # pragma: no cover - optional dependency for local runs
     wandb = None
 
 DEFAULT_CREDENTIALS_PATH = _REPO_ROOT / "wandb_credentials.txt"
+DEFAULT_HF_CREDENTIALS_PATH = _REPO_ROOT / "hf_credentials.txt"
+
+
+def resolve_hf_token(credentials_path: Optional[Path] = None) -> tuple[Optional[str], str]:
+    """
+    Resolve Hugging Face token. hf_credentials.txt wins over a stale HF_TOKEN env var.
+    Returns (token, source) where source is 'file', 'env', or 'none'.
+    """
+    path = credentials_path or DEFAULT_HF_CREDENTIALS_PATH
+    file_token: Optional[str] = None
+    if path.is_file():
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key, value = key.strip().lower(), value.strip().strip('"').strip("'")
+                if not value or value == "YOUR_HUGGINGFACE_TOKEN_HERE":
+                    continue
+                if key in ("hf_token", "token", "huggingface_token", "hf_token_read"):
+                    file_token = value
+
+    env_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+
+    if file_token:
+        if env_token and env_token != file_token:
+            print(
+                "note: using hf_credentials.txt (ignoring a different HF_TOKEN in your shell)",
+                file=sys.stderr,
+            )
+        return file_token, "file"
+    if env_token:
+        return env_token, "env"
+    return None, "none"
+
+
+def load_hf_credentials(
+    credentials_path: Optional[Path] = None,
+) -> Dict[str, str]:
+    """Load HF token into os.environ for transformers / huggingface_hub."""
+    path = credentials_path or DEFAULT_HF_CREDENTIALS_PATH
+    creds: Dict[str, str] = {}
+    if path.is_file():
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key, value = key.strip().lower(), value.strip().strip('"').strip("'")
+                if value and value != "YOUR_HUGGINGFACE_TOKEN_HERE":
+                    creds[key] = value
+
+    token, source = resolve_hf_token(credentials_path)
+    if token:
+        os.environ["HF_TOKEN"] = token
+        os.environ["HUGGING_FACE_HUB_TOKEN"] = token
+        creds["hf_token"] = token
+        creds["_token_source"] = source
+    return creds
 
 
 def load_wandb_credentials(

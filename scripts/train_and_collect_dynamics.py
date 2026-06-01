@@ -2,18 +2,15 @@
 """
 Fine-tune a transformer on SNLI and write per-epoch prediction logs for cartography.
 
-Requires GPU for reasonable speed (CPU works on small --max-train-samples).
+For full pipeline (snapshots, results/<timestamp>/, W&B figures), prefer:
+  python scripts/run_cartography_experiment.py --task snli --preset distilbert
+
+Multi-model Colab suite:
+  python scripts/train_all_models.py
 
 Examples:
-  # fast smoke test (~2-5 min on GPU)
   python scripts/train_and_collect_dynamics.py --preset distilbert --max-train-samples 2000 --epochs 3
-
-  # stronger model, more data
-  python scripts/train_and_collect_dynamics.py --preset roberta-base --max-train-samples 50000 --epochs 5
-
-  # train only on a cartography subset (paper section 3 style)
-  python scripts/train_and_collect_dynamics.py --preset distilbert \\
-    --subset-file data/processed/selected_high_variability_33pct.jsonl
+  python scripts/train_and_collect_dynamics.py --preset llama-3.2-1b --max-train-samples 5000
 """
 
 from __future__ import annotations
@@ -31,10 +28,18 @@ import json
 from ml_cartography.training.glue_trainer import (
     MODEL_PRESETS,
     TrainConfig,
+    apply_preset_defaults,
     load_guids_from_jsonl,
     train_and_collect_dynamics,
 )
-from scripts.common import add_wandb_args, finish_wandb, init_wandb, load_pipeline_config, use_wandb
+
+from scripts.common import (
+    add_wandb_args,
+    finish_wandb,
+    init_wandb,
+    load_hf_credentials,
+    load_pipeline_config,
+)
 
 
 def main() -> None:
@@ -44,8 +49,9 @@ def main() -> None:
         "--preset",
         choices=list(MODEL_PRESETS.keys()),
         default="distilbert",
-        help="Model shortcut (distilbert is smallest/fastest)",
+        help="Model shortcut (distilbert, roberta-base, llama-3.2-1b, ministral-3b)",
     )
+    parser.add_argument("--no-4bit", action="store_true", help="Disable 4-bit for large models")
     parser.add_argument("--model-name", default=None, help="Override HuggingFace model id")
     parser.add_argument("--dataset", default="snli", choices=["snli"])
     parser.add_argument("--epochs", type=int, default=5)
@@ -70,6 +76,7 @@ def main() -> None:
     parser.add_argument("--checkpoint-dir", type=Path, default=None)
     add_wandb_args(parser)
     args = parser.parse_args()
+    load_hf_credentials()
 
     model_name = args.model_name or MODEL_PRESETS[args.preset]
     max_train = None if args.max_train_samples == 0 else args.max_train_samples
@@ -96,6 +103,9 @@ def main() -> None:
         checkpoint_dir=args.checkpoint_dir,
         subset_guids=subset_guids,
     )
+    cfg = apply_preset_defaults(cfg, args.preset)
+    if args.no_4bit:
+        cfg.load_in_4bit = False
 
     if args.config:
         with args.config.open("r", encoding="utf-8") as f:

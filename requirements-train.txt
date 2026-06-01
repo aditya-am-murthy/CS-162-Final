@@ -1,6 +1,12 @@
-# GPU training deps (install after conda env; pick CUDA wheel for your driver)
-# pip install torch --index-url https://download.pytorch.org/whl/cu124
+# GPU training deps (local/conda — install CUDA torch FIRST, then this file)
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#   pip install -r requirements-train.txt
+# Colab: use requirements-colab.txt via scripts/colab_setup.sh (never pip install torch from PyPI)
 torch>=2.1.0
 transformers>=4.38.0
 datasets>=2.17.0
 accelerate>=0.27.0
+bitsandbytes>=0.43.0
+peft>=0.10.0
+unsloth
+huggingface_hub>=0.23.0

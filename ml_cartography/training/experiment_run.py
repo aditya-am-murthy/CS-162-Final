@@ -85,7 +85,7 @@ class ExperimentPaths:
         return self.logs_dir / "training_metrics.jsonl"
 
     def publish_to_results(self, results_root: Path = RESULTS_ROOT) -> Path:
-        """Copy experiment artifacts into results/<run_id>/ for the report + Streamlit app."""
+        """Copy artifacts to results/<run_id>/ (report.md stays at results root)."""
         dest = results_root / self.run_id
         if dest.exists():
             shutil.rmtree(dest)

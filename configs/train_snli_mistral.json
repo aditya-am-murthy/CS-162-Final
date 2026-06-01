@@ -1,0 +1,14 @@
+{
+  "dataset": "snli",
+  "model_name": "unsloth/Ministral-3-3B-Base-2512-unsloth-bnb-4bit",
+  "epochs": 5,
+  "batch_size": 4,
+  "learning_rate": 1e-5,
+  "max_train_samples": 10000,
+  "max_eval_samples": 2000,
+  "max_length": 256,
+  "load_in_4bit": false,
+  "gradient_checkpointing": true,
+  "gradient_accumulation_steps": 4,
+  "output_logs": "data/raw/epoch_predictions_snli_ministral.jsonl"
+}
