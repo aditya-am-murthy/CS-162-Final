@@ -7,7 +7,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from ml_cartography.analysis.data_map import assign_region
+from ml_cartography.analysis.data_map import annotate_regions
 from ml_cartography.core.dynamics import (
     DynamicsRecord,
     add_epoch_observation,
@@ -36,9 +36,7 @@ def records_to_coordinates(
             int(row["pred_label"]),
         )
     out = [summarize_record(r) for r in by_guid.values()]
-    for row in out:
-        row["region"] = assign_region(float(row["confidence"]), float(row["variability"]))
-    return out
+    return annotate_regions(out)
 
 
 def save_snapshot(

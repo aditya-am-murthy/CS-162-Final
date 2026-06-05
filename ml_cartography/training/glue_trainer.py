@@ -568,6 +568,7 @@ def _train_epoch_winogrande(
     device: torch.device,
     scaler: Optional[torch.cuda.amp.GradScaler],
     epoch: int,
+    cfg: TrainConfig,
     grad_accum: int = 1,
 ) -> float:
     model.train()
@@ -843,21 +844,32 @@ def train_and_collect_dynamics(
     cumulative_param_units = 0.0
     idea2_metric_history: List[Dict] = []
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    optimizer = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=cfg.learning_rate,
+    )
+    if is_winogrande:
+        total_batches_per_epoch = max((len(train_ds) + cfg.batch_size - 1) // cfg.batch_size, 1)
+    else:
+        total_batches_per_epoch = max(len(train_ds) // cfg.batch_size, 1)
+        if len(train_ds) % cfg.batch_size != 0:
+            total_batches_per_epoch += 1
+    total_optimizer_steps = max(
+        ((total_batches_per_epoch + grad_accum - 1) // grad_accum) * cfg.epochs,
+        1,
+    )
+    warmup_steps = int(total_optimizer_steps * cfg.warmup_ratio)
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        warmup_steps,
+        total_optimizer_steps,
+    )
 
     for epoch in range(1, cfg.epochs + 1):
         if is_winogrande:
             train_loader = _build_winogrande_pair_loader(train_ds, cfg, tokenizer, device)
         else:
             train_loader = _build_train_loader(train_ds, cfg, sample_weights, device)
-        total_steps = (len(train_loader) // grad_accum) * (cfg.epochs - epoch + 1)
-        warmup_steps = int(total_steps * cfg.warmup_ratio)
-        optimizer = torch.optim.AdamW(
-            [p for p in model.parameters() if p.requires_grad],
-            lr=cfg.learning_rate,
-        )
-        scheduler = get_linear_schedule_with_warmup(
-            optimizer, warmup_steps, max(total_steps, 1)
-        )
 
         if is_winogrande:
             train_loss, optimizer_steps = _train_epoch_winogrande(
@@ -868,6 +880,7 @@ def train_and_collect_dynamics(
                 device,
                 scaler,
                 epoch,
+                cfg,
                 grad_accum=grad_accum,
             )
         else:

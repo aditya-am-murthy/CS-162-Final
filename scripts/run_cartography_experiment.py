@@ -166,6 +166,8 @@ def main() -> None:
     parser.add_argument("--no-4bit", action="store_true", help="Disable 4-bit loading for large models")
     add_wandb_args(parser)
     args = parser.parse_args()
+    max_train_samples = None if args.max_train_samples == 0 else args.max_train_samples
+    max_eval_samples = None if args.max_eval_samples == 0 else args.max_eval_samples
 
     model_name = args.model_name or MODEL_PRESETS[args.preset]
     slug_parts = [args.task]
@@ -181,7 +183,8 @@ def main() -> None:
         "preset": args.preset,
         "model_name": model_name,
         "epochs": args.epochs,
-        "max_train_samples": args.max_train_samples,
+        "max_train_samples": max_train_samples,
+        "max_eval_samples": max_eval_samples,
     }
     if args.dataset == "winogrande":
         config["winogrande_config"] = args.winogrande_config
@@ -203,8 +206,8 @@ def main() -> None:
             dataset=args.dataset,
             model_name=model_name,
             epochs=args.epochs,
-            max_train_samples=args.max_train_samples,
-            max_eval_samples=args.max_eval_samples,
+            max_train_samples=max_train_samples,
+            max_eval_samples=max_eval_samples,
             output_logs=exp.epoch_logs_path(),
             checkpoint_dir=exp.checkpoints_dir,
             snapshot_dir=exp.snapshots_dir,
@@ -279,7 +282,7 @@ def main() -> None:
         pcfg = PreferenceTrainConfig(
             model_name=model_name,
             epochs=args.epochs,
-            max_samples=args.max_train_samples,
+            max_samples=max_train_samples,
             output_logs=exp.epoch_logs_path(),
             snapshot_dir=exp.snapshots_dir,
             checkpoint_dir=exp.models_dir,
@@ -299,7 +302,7 @@ def main() -> None:
         icfg = InstructionTrainConfig(
             model_name=model_name,
             epochs=args.epochs,
-            max_samples=args.max_train_samples,
+            max_samples=max_train_samples,
             output_logs=exp.epoch_logs_path(),
             snapshot_dir=exp.snapshots_dir,
         )
