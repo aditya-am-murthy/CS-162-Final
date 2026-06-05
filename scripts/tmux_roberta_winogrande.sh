@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Paper-style static data map: RoBERTa-base on WinoGrande (NOT Idea #2 dynamic).
+# Paper-style static data map: RoBERTa-large on full WinoGrande (NOT Idea #2 dynamic).
 #
 # Usage:
 #   bash scripts/tmux_roberta_winogrande.sh
@@ -30,16 +30,16 @@ tmux has-session -t "$SESSION" 2>/dev/null && tmux kill-session -t "$SESSION"
 CMD="cd '$ROOT' && $PYTHON scripts/run_cartography_experiment.py \\
   --task snli \\
   --dataset winogrande \\
-  --preset roberta-base \\
-  --max-train-samples 5000 \\
-  --max-eval-samples 1000 \\
-  --epochs 5 \\
-  --wandb-run-name winogrande_roberta_paper_5k"
+  --preset roberta-large \\
+  --max-train-samples 0 \\
+  --max-eval-samples 0 \\
+  --epochs 6 \\
+  --wandb-run-name winogrande_roberta_large_paper_full"
 
 tmux new-session -d -s "$SESSION" -n roberta-winogrande
 tmux send-keys -t "$SESSION:0" "$CMD" C-m
 
 echo "Started tmux session: $SESSION"
 echo "  attach:  tmux attach -t $SESSION"
-echo "  W&B run: winogrande_roberta_paper_5k"
-echo "  task=snli (static map), dataset=winogrande, 5000 train / 5 epochs"
+echo "  W&B run: winogrande_roberta_large_paper_full"
+echo "  task=snli (static map), dataset=winogrande, full train / full val / 6 epochs"
