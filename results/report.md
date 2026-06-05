@@ -1,189 +1,174 @@
-# Dataset Cartography — Experiment Report
+# CS-162 Dataset Cartography — Experiment Report
 
 **Paper:** *Dataset Cartography: Mapping and Diagnosing Datasets with Training Dynamics* (Swayamdipta et al., EMNLP 2020)  
-**Project:** CS-162 Final — educational reimplementation  
-**Figures:** Paper-style synthetic figures live in `results/20260525_000000_baseline_synthetic/`. New GPU runs publish timestamped folders via `scripts/run_cartography_experiment.py` (see `results/runs_index.json`).
+**Project:** CS-162 Final — educational reimplementation with extensions  
+**Primary training entry point:** `scripts/dual_gpu_train_suite.py` (local 3-GPU suite; replaces `notebooks/colab_train_suite.ipynb`)
 
 ---
 
-## Overview
+## What `dual_gpu_train_suite.py` runs
 
-This project reproduces the core ideas of Dataset Cartography: using **training dynamics** from a single model training run to assign each example coordinates on a **data map** (confidence vs. variability), diagnose dataset regions, guide data selection, detect label noise, and relate dynamics to uncertainty.
+This script orchestrates **baseline SNLI cartography training** for four model presets, then archives artifacts under `data/trained_models/<preset>/` so later runs (Idea #1 / Idea #2) can reuse trained weights without re-running the full suite.
 
-The pipeline runs in a conda environment (`cs162-cartography`) with experiment scripts under `scripts/`. Progress and metrics can be logged to [Weights & Biases](https://wandb.ai) via `wandb_credentials.txt`.
+### Phase 1 — Smoke tests (no Weights & Biases)
 
-**Data source:** Figures can be generated from **paper-shaped synthetic coordinates** (default in `07_generate_insight_figures.py`) or from **real training dynamics** after GPU fine-tuning (see below).
+All three jobs launch **in parallel** on separate GPUs to verify loading, CUDA, Hugging Face auth, and 4-bit dependencies before a long run.
 
-**Training in this repo:** `scripts/run_cartography_experiment.py` and `scripts/train_all_models.py` fine-tune **DistilBERT, RoBERTa-base, Llama-3.2-1B, and Mistral-7B** on SNLI (4-bit on T4 for large models), with W&B logging and timestamped `results/<run_id>/` artifacts. Legacy entry: `scripts/train_and_collect_dynamics.py`. Selection bar charts (`fig03`, `fig04`) still use **published WinoGrande numbers** unless you add full retrain-on-subset runs yourself.
+| GPU | Job | Task | Model | Train / val | Epochs |
+|-----|-----|------|-------|-------------|--------|
+| cuda:0 | `distilbert_snli` | `snli` | DistilBERT | 500 / 200 | 2 |
+| cuda:1 | `llama_mini` | `dynamic` | Llama 3.2 1B (4-bit) | 200 / 200 | 1 |
+| cuda:2 | `ministral_mini` | `dynamic` | Ministral 3 3B (Unsloth 4-bit) | 200 / 200 | 1 |
 
-**Follow-up ideas implemented:**
-- **Idea #1 (Preference / IT maps):** `--task preference` (UltraFeedback-style pairs) and `--task instruction` (Alpaca); high-variability subsets exported for alignment experiments.
-- **Idea #2 (Dynamic maps):** `--task dynamic` saves per-epoch snapshots, region trajectories, and adaptive curriculum reweighting after `--curriculum-after-epoch`.
+- **No W&B logging** (`--no-wandb`)
+- **Not archived** to `data/trained_models/` (ephemeral under `experiments/runs/`)
 
----
+### Phase 2 — Full training (W&B enabled by default)
 
-## Experiments Conducted
+Three **parallel worker processes**, each pinned to one physical GPU via `CUDA_VISIBLE_DEVICES`:
 
-### 1. Training dynamics and data maps (Paper Section 2)
+| GPU | Models (order) | Task | Default hyperparameters |
+|-----|----------------|------|-------------------------|
+| cuda:0 | DistilBERT → RoBERTa-base | `dynamic` | 10k train, 2k val, 5 epochs |
+| cuda:1 | Llama 3.2 1B | `dynamic` | same |
+| cuda:2 | Ministral 3 3B | `dynamic` | same |
 
-**Goal:** Map every training example by how the model’s belief in the gold label evolves across epochs.
+Each run invokes `scripts/run_cartography_experiment.py`, which:
 
-**Method (this repo):**
-- Input: per-epoch logs with `guid`, `epoch`, `gold_label`, `pred_label`, `prob_gold` (`scripts/01_collect_dynamics.py`), **or** direct synthetic coordinates (`ml_cartography/data/synthetic_cartography.py`).
-- For each example, compute:
-  - **Confidence** — mean predicted probability of the gold label across epochs.
-  - **Variability** — standard deviation of that probability across epochs.
-  - **Correctness** — fraction of epochs where the predicted label matches the gold label.
-- Assign **regions**: easy-to-learn (high confidence, low variability), hard-to-learn (low confidence, low variability), ambiguous (high variability).
+1. Fine-tunes on **SNLI** and logs per-epoch gold-label probabilities  
+2. Builds **cartography coordinates** (confidence, variability, correctness) and region labels  
+3. Saves **per-epoch map snapshots** and optional **curriculum reweighting** (Idea #2; see below)  
+4. Writes figures, dynamics JSONL, and model checkpoints  
+5. Copies a full artifact tree to `data/trained_models/<preset>/` plus an entry in `data/trained_models/manifest.json`
 
-**Scripts:** `00_generate_toy_epoch_logs.py`, `01_collect_dynamics.py`, `02_build_data_map.py`, `07_generate_insight_figures.py`
+**Default command (matches Colab overnight suite):**
 
-**Figures:**
-| File | Description |
-|------|-------------|
-| `20260525_000000_baseline_synthetic/fig01_data_map_correctness.png` | Main data map: variability (x) vs. confidence (y), points colored by correctness; annotated easy / hard / ambiguous regions |
-| `fig02_density_histograms.png` | Marginal distributions of confidence, variability, and correctness |
-| `fig08_region_composition.png` | Share of examples in each region (~68% easy, ~14% hard, ~18% ambiguous in synthetic run) |
-
-**Insights:**
-- Strong models produce a characteristic **bell-shaped** envelope: a dense **easy-to-learn** cluster (top-left), a smaller **hard-to-learn** cluster (bottom-left), and an **ambiguous** band along higher variability (often mid confidence).
-- Easy-to-learn examples dominate the dataset; they are important for **optimization** but less so for OOD generalization in later experiments.
-- Data maps are cheap to build after one training run and give a actionable view of dataset structure.
-
----
-
-### 2. Data selection by region (Paper Section 3)
-
-**Goal:** Test whether training only on examples from specific map regions changes in-distribution (ID) vs. out-of-distribution (OOD) performance.
-
-**Method (paper):** Retrain RoBERTa-large from scratch on the top **33%** of examples under each strategy (ambiguous, hard-to-learn, high-confidence, random, etc.), evaluate on validation (ID) and challenge sets (OOD).
-
-**Method (this repo):**
-- `scripts/03_select_subsets.py` exports subset JSONL files for each strategy.
-- `fig03_selection_id_ood_bars.png` plots **WinoGrande results from Table 2 in the paper** (not retrained in this repo).
-
-**Figure:**
-| File | Description |
-|------|-------------|
-| `fig03_selection_id_ood_bars.png` | Grouped bars: ID (validation) vs. OOD (WSC) accuracy per selection strategy |
-
-**Insights (from paper, visualized here):**
-- **Ambiguous** (highest variability) subset achieves the **best OOD** score (87.6% WSC) while using only one-third of the data — **above the 100% training baseline** (86.0% OOD).
-- **Hard-to-learn** and **low-correctness** subsets also help OOD; **high-confidence**, **high-correctness**, and **low-variability** subsets perform **below random** on OOD.
-- Challenging examples (ambiguous + hard) drive robustness; “easy” subsets hurt generalization even when ID accuracy looks acceptable.
-
----
-
-### 3. Role of easy-to-learn examples (Paper Section 4)
-
-**Goal:** Understand whether ambiguous-only training sets are enough to learn, and whether mixing in easy examples helps optimization at a cost to OOD performance.
-
-**Method (paper):** On WinoGrande, train on decreasing fractions of the most ambiguous examples (50% down to 1%); ablate replacing part of a fixed 17% ambiguous set with easy-to-learn examples.
-
-**Method (this repo):**
-- `scripts/06_ambiguous_ablation.py` builds subset files and logs proxy metrics.
-- `fig04_ambiguous_ablation_curves.png` uses **paper-reported curve shapes** (Fig. 3).
-
-**Figure:**
-| File | Description |
-|------|-------------|
-| `fig04_ambiguous_ablation_curves.png` | Left/center: ID and OOD accuracy vs. % ambiguous training data; right: effect of replacing easy examples into a 17% ambiguous core |
-
-**Insights:**
-- Training on **very small ambiguous-only** sets (&lt;25%) often **fails to optimize** (chance-level / majority baseline) — ambiguous points alone are not sufficient.
-- **Random** subsets of the same size still learn, but with weaker OOD performance as data shrinks.
-- Adding a **small fraction of easy-to-learn** examples to an ambiguous core restores ID accuracy but **reduces OOD** as the easy fraction grows — a tradeoff between optimization and generalization.
-
----
-
-### 4. Detecting mislabeled examples (Paper Section 5)
-
-**Goal:** Show that label noise moves examples on the map and that simple models can flag likely errors.
-
-**Method (this repo):**
-- Flip labels on the **1% highest-confidence (easiest)** examples (`ml_cartography/experiments/noise_injection.py`).
-- Shift their dynamics toward **lower confidence** and **higher variability** (simulating post-retrain behavior).
-- `scripts/04_detect_mislabeled.py` trains a **logistic regression** detector on confidence, variability, and correctness.
-
-**Figure:**
-| File | Description |
-|------|-------------|
-| `fig05_noise_injection_shift.png` | Log-density of confidence/variability before vs. after noise; scatter highlighting shifted noised points |
-
-**Insights:**
-- Noised (mislabeled) examples migrate toward the **hard-to-learn** region after retraining dynamics are updated.
-- The **hard-to-learn** zone is enriched for labeling errors; confidence-based screening is a cheap cleaning signal (paper reports ~67–76% precision with human validation on SNLI / WinoGrande).
-- Data maps support **dataset hygiene** without manual audit of the full corpus.
-
----
-
-### 5. Connection to uncertainty (Paper Section 6)
-
-**Goal:** Relate training dynamics to human disagreement (intrinsic uncertainty) and model uncertainty (dropout).
-
-**Method (this repo):**
-- `scripts/05_uncertainty_checks.py` computes Spearman correlation between dynamics and agreement / dropout proxies.
-- Heatmap and regression figures use a **human-agreement proxy** tied to confidence when multi-annotator labels are unavailable.
-
-**Figures:**
-| File | Description |
-|------|-------------|
-| `fig06_human_agreement_heatmap.png` | Binned data map colored by mean human agreement (high agreement with high confidence) |
-| `fig07_uncertainty_regression.png` | Scatter + trend: variability vs. dropout uncertainty; confidence vs. human agreement |
-
-**Insights:**
-- **Confidence** tracks **intrinsic uncertainty** (human agreement): when annotators agree, the model is consistently confident on the gold label.
-- **Variability** tracks **model uncertainty** (flip-flopping predictions across epochs), aligned with dropout-based uncertainty in the paper.
-- Training dynamics are a **lightweight alternative** to expensive ensemble or dropout uncertainty estimates.
-
----
-
-## Summary of Main Takeaways
-
-1. **One training run** yields a map that diagnoses an entire dataset.
-2. **Ambiguous** examples are the best bet for **OOD robustness**; they often beat training on 100% of the data with only 33% selected.
-3. **Easy-to-learn** examples are numerous and needed for **stable training**, but oversampling them hurts OOD performance.
-4. **Hard-to-learn** examples flag **noise and difficulty**; useful for cleaning and selective training.
-5. The field’s focus can shift from **more data** to **better-chosen data** using map coordinates.
-
----
-
-## How to Reproduce
-
-**Synthetic pipeline (no GPU):**
 ```bash
 conda activate cs162-cartography
-python scripts/run_all_experiments.py
-python scripts/07_generate_insight_figures.py
+python scripts/dual_gpu_train_suite.py
+# equivalent training only:
+python scripts/dual_gpu_train_suite.py --train-only --max-train-samples 10000 --epochs 5
 ```
 
-**Trained dynamics (GPU):**
+**Related scripts (not run by the suite itself):**
+
+| Script | Role |
+|--------|------|
+| `scripts/run_cartography_experiment.py` | Single experiment: train → maps → `results/<run_id>/` |
+| `scripts/train_all_models.py` | Same four models, **sequential** on one machine |
+| Colab notebook cells | Idea #1 preference / Idea #2 dynamic — run **after** Phase 2 archives exist |
+
+---
+
+## What the paper does (baseline we reproduce)
+
+The paper trains a **single encoder** (e.g. RoBERTa-large) on a task such as SNLI or WinoGrande, records **training dynamics** each epoch (probability of the gold label, predicted label), and plots a **data map**:
+
+- **x:** variability (std of gold-label probability across epochs)  
+- **y:** confidence (mean gold-label probability)  
+- **Regions:** easy-to-learn, hard-to-learn, ambiguous  
+
+Downstream uses include subset selection (§3), ambiguous-only ablations (§4), mislabel detection (§5), and uncertainty analysis (§6). The numbered pipeline `scripts/00`–`07` implements these analyses on logged dynamics (synthetic or real).
+
+---
+
+## Extensions beyond the paper (what we add)
+
+These are **not** in Swayamdipta et al. (2020); they are course/project add-ons built on the same dynamics machinery.
+
+| Extension | Paper? | Summary |
+|-----------|--------|---------|
+| **Four model families** | Partially | Paper focuses on one model per task; we run DistilBERT, RoBERTa-base, Llama 3.2 1B, and Ministral 3 3B on SNLI for comparison |
+| **Causal / 4-bit LMs on NLI** | No | Llama (bitsandbytes NF4) and Ministral (Unsloth pre-quantized checkpoint) as sequence-classification heads on SNLI |
+| **3-GPU parallel orchestration** | No | Smoke + full training split across GPUs; encoders share GPU 0, one LLM per GPU |
+| **Timestamped `results/` + `data/trained_models/`** | No | Streamlit-ready run folders and a stable archive for follow-up experiments |
+| **W&B integration** | No | Metrics and map images logged per run (disabled for smoke tests) |
+| **Idea #1 — Preference / instruction maps** | No | Cartography on preference pairs and instruction data (see below) |
+| **Idea #2 — Dynamic maps + curriculum** | No | Per-epoch snapshots, region trajectories, adaptive sampling (see below) |
+
+**Practical deviations from paper protocol:**
+
+- **Subset size:** default 10k SNLI train samples (not full ~550k) for feasible GPU time  
+- **Task:** suite Phase 2 uses `--task dynamic` (snapshots + curriculum), not plain `snli`  
+- **Selection / OOD bars (`fig03`, `fig04`):** still use **published WinoGrande numbers** unless you add full retrain-on-subset jobs  
+- **Model scale:** Ministral 3 3B instead of paper’s RoBERTa-large / BERT-era encoders for the “large model” slot  
+
+---
+
+## Idea #1 — Preference Data Maps (alignment / RLHF-style data)
+
+**Motivation:** The paper maps **classification** dynamics. Modern alignment pipelines use **preference pairs** (chosen vs. rejected). Idea #1 asks: *Can we build a “Preference Data Map” using the same confidence/variability ideas on pair-level training?*
+
+**What it does in this repo:**
+
+- **Task:** `--task preference` in `run_cartography_experiment.py`  
+- **Data:** UltraFeedback-style preference pairs (or synthetic pairs in tests)  
+- **Dynamics:** Per-epoch signals on whether the model ranks the **chosen** response above the **rejected** (margin / probability on the preferred side)  
+- **Map:** Preference-specific regions (e.g. clear preference, borderline, inconsistent) via `ml_cartography/analysis/preference_map.py`  
+- **Export:** `dynamics/subset_high_variability.jsonl` — ambiguous / high-variability pairs for **DPO-style** or selective training  
+
+**Optional variant:** `--task instruction` logs dynamics on **instruction-tuning** (Alpaca-style) examples for the same diagnostic view on IT data.
+
+**How to run (after baseline weights exist in `data/trained_models/`):**
+
 ```bash
-pip install -r requirements-train.txt
-python scripts/train_and_collect_dynamics.py --preset distilbert --max-train-samples 20000
-python scripts/01_collect_dynamics.py --input data/raw/epoch_predictions_snli_distilbert.jsonl
-python scripts/02_build_data_map.py
-python scripts/07_generate_insight_figures.py --input data/processed/cartography_with_regions.jsonl
+python scripts/run_cartography_experiment.py --task preference --preset distilbert \
+  --max-train-samples 3000 --epochs 5 --wandb-run-name colab_preference
+```
+
+**Not run by `dual_gpu_train_suite.py`** — execute separately once SNLI baselines are archived.
+
+---
+
+## Idea #2 — Dynamic cartography (snapshots, trajectories, curriculum)
+
+**Motivation:** The paper’s map uses **one** aggregate point per example after full training. Idea #2 treats the map as **time-varying**: where each example sits after each epoch, how **regions change** over training, and whether **reweighting** the training sampler toward ambiguous examples improves learning.
+
+**What it does in this repo (`--task dynamic`):**
+
+1. **Per-epoch snapshots** — `dynamics/snapshots/epoch_XXX_coordinates.jsonl` after each epoch  
+2. **Region trajectories** — `dynamics/region_trajectories.jsonl` (easy → ambiguous → hard paths per `guid`)  
+3. **Adaptive curriculum** — after `--curriculum-after-epoch` (default **2** in the full suite):
+   - Upweight **ambiguous** examples (`ambiguous_boost`, default 2.5×)  
+   - Downweight **easy** examples (`easy_scale`, default 0.4×)  
+   - Slight boost for **hard** examples (`hard_boost`, default 1.2×)  
+   - Implemented in `ml_cartography/training/dynamic_cartography.py` via `WeightedRandomSampler`  
+
+**Phase 2 of `dual_gpu_train_suite.py` always uses `dynamic`** with `curriculum_after_epoch=2` and 5 epochs, so every archived model includes snapshots + curriculum behavior.
+
+**Standalone Idea #2 example (e.g. RoBERTa only):**
+
+```bash
+python scripts/run_cartography_experiment.py --task dynamic --preset roberta-base \
+  --curriculum-after-epoch 2 --epochs 5 --wandb-run-name colab_dynamic
 ```
 
 ---
 
-## Figure Index
+## Artifact layout
 
-| Figure | Paper reference | Experiment |
-|--------|-----------------|------------|
-| `fig01_data_map_correctness.png` | Fig. 1–2 | Data maps |
-| `fig02_density_histograms.png` | §2 histograms | Training dynamics distributions |
-| `fig03_selection_id_ood_bars.png` | Table 2 | Data selection (WinoGrande) |
-| `fig04_ambiguous_ablation_curves.png` | Fig. 3 | Easy vs. ambiguous ablation |
-| `fig05_noise_injection_shift.png` | Fig. 4 | Mislabeled / noise detection |
-| `fig06_human_agreement_heatmap.png` | Fig. 5 | Uncertainty — human agreement |
-| `fig07_uncertainty_regression.png` | Fig. 7 (appendix) | Uncertainty — dropout regression |
-| `fig08_region_composition.png` | §2 | Region composition summary |
+| Location | Contents |
+|----------|----------|
+| `experiments/runs/<timestamp>_<task>_<preset>/` | Raw run: config, dynamics, figures, checkpoints |
+| `results/<timestamp>_<task>_<preset>/` | Published copy (if not `--no-publish`) |
+| `data/trained_models/<preset>/` | **Archive** after Phase 2: models, dynamics, maps, `archive_meta.json` |
+| `data/trained_models/manifest.json` | Index of archived presets for downstream Idea #1 / #2 |
+| `experiments/dual_gpu_train_suite_summary.json` | Smoke + train exit codes and timing |
+
+---
+
+## Suggested workflow
+
+1. **Install deps:** `pip install -r requirements-train.txt` (`bitsandbytes`, `unsloth`, etc.)  
+2. **Credentials:** `hf_credentials.txt` (and optional `wandb_credentials.txt`) in repo root  
+3. **Run suite:** `python scripts/dual_gpu_train_suite.py`  
+4. **Idea #1:** preference / instruction experiments using archived encoders or fresh runs  
+5. **Analysis:** `scripts/02_build_data_map.py`, `07_generate_insight_figures.py`, or Streamlit over `results/`  
 
 ---
 
 ## References
 
-- Swayamdipta, S., Schwartz, R., Bauchnik, S., et al. (2020). *Dataset Cartography: Mapping and Diagnosing Datasets with Training Dynamics.* EMNLP 2020.
-- Official implementation: [allenai/cartography](https://github.com/allenai/cartography)
+- Swayamdipta, S., et al. (2020). *Dataset Cartography.* EMNLP 2020.  
+- [allenai/cartography](https://github.com/allenai/cartography)  
+- Course pipeline: `README.md`, `scripts/00`–`07`, synthetic figures under `results/20260525_000000_baseline_synthetic/`

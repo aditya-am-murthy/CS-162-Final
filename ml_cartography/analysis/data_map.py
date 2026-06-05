@@ -121,23 +121,51 @@ def prepare_region_annotations(
 def save_data_map_plot(
     rows: List[Dict],
     output_path: Path,
+    *,
+    color_by: str = "region",
+    title: str = "Dataset Cartography Data Map",
     thresholds: Dict[str, float] | None = None,
 ) -> None:
+    """Plot data map; use color_by='correctness' for paper Fig. 1 style (green/red)."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     limits = thresholds or fit_region_thresholds(rows)
     x = [float(r["variability"]) for r in rows]
     y = [float(r["confidence"]) for r in rows]
-    color_by_region = {
-        "easy_to_learn": "#4caf50",
-        "hard_to_learn": "#f44336",
-        "ambiguous": "#2196f3",
-        "mixed": "#9e9e9e",
-    }
-    c = [color_by_region.get(r.get("region", "mixed"), "#9e9e9e") for r in rows]
 
     plt.figure(figsize=(8, 6))
-    plt.scatter(x, y, c=c, alpha=0.55, s=18, linewidths=0)
+    if color_by == "correctness":
+        correct = [float(r.get("correctness", 0.0)) >= 0.67 for r in rows]
+        if any(correct):
+            plt.scatter(
+                [x[i] for i in range(len(rows)) if correct[i]],
+                [y[i] for i in range(len(rows)) if correct[i]],
+                c="#4caf50",
+                alpha=0.45,
+                s=18,
+                label="mostly correct",
+            )
+        if any(not c for c in correct):
+            plt.scatter(
+                [x[i] for i in range(len(rows)) if not correct[i]],
+                [y[i] for i in range(len(rows)) if not correct[i]],
+                c="#f44336",
+                alpha=0.5,
+                s=22,
+                marker="x",
+                label="often incorrect",
+            )
+        plt.legend(loc="best", fontsize=9)
+    else:
+        color_by_region = {
+            "easy_to_learn": "#4caf50",
+            "hard_to_learn": "#f44336",
+            "ambiguous": "#2196f3",
+            "mixed": "#9e9e9e",
+        }
+        c = [color_by_region.get(r.get("region", "mixed"), "#9e9e9e") for r in rows]
+        plt.scatter(x, y, c=c, alpha=0.7, s=22)
+
     plt.axvline(
         limits["low_variability_max"],
         color="#616161",
@@ -168,7 +196,7 @@ def save_data_map_plot(
     )
     plt.xlabel("Variability (std of gold-label probability)")
     plt.ylabel("Confidence (mean gold-label probability)")
-    plt.title("Dataset Cartography Data Map")
+    plt.title(title)
     plt.grid(alpha=0.2)
     plt.tight_layout()
     plt.savefig(output_path, dpi=200)

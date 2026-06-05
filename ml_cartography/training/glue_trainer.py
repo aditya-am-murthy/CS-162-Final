@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from tqdm import tqdm
 from transformers import (
@@ -54,6 +55,7 @@ class TrainConfig:
     gradient_accumulation_steps: int = 1
     # ministral + unsloth 4-bit: full backbone FT often dtype/checkpoint errors on T4
     ministral_freeze_backbone: bool = True
+    winogrande_config: str = "winogrande_xl"
 
 
 class NliDataset(Dataset):
@@ -171,6 +173,215 @@ def _load_snli_rows(
     return rows
 
 
+def _load_mnli_rows(
+    split: str,
+    max_samples: Optional[int],
+    subset_guids: Optional[Set[str]],
+    seed: int,
+) -> List[Dict]:
+    """MultiNLI (Williams et al., 2018) — 3-way NLI, matched validation split."""
+    from datasets import load_dataset
+
+    hf_split = "train" if split == "train" else "validation_matched"
+    ds = load_dataset("nyu-mll/glue", "mnli", split=hf_split)
+    ds = ds.filter(lambda x: x["label"] != -1)
+
+    rows: List[Dict] = []
+    for i, ex in enumerate(ds):
+        guid = f"mnli-{hf_split}-{i:07d}"
+        if subset_guids is not None and guid not in subset_guids:
+            continue
+        rows.append(
+            {
+                "guid": guid,
+                "premise": ex["premise"],
+                "hypothesis": ex["hypothesis"],
+                "label": int(ex["label"]),
+            }
+        )
+
+    if max_samples is not None and len(rows) > max_samples:
+        rng = __import__("random").Random(seed)
+        rng.shuffle(rows)
+        rows = rows[:max_samples]
+    return rows
+
+
+def _load_qnli_rows(
+    split: str,
+    max_samples: Optional[int],
+    subset_guids: Optional[Set[str]],
+    seed: int,
+) -> List[Dict]:
+    """QNLI — binary entailment (question, passage sentence), from SQuAD-derived GLUE task."""
+    from datasets import load_dataset
+
+    hf_split = "train" if split == "train" else "validation"
+    ds = load_dataset("nyu-mll/glue", "qnli", split=hf_split)
+
+    rows: List[Dict] = []
+    for i, ex in enumerate(ds):
+        guid = f"qnli-{hf_split}-{i:07d}"
+        if subset_guids is not None and guid not in subset_guids:
+            continue
+        rows.append(
+            {
+                "guid": guid,
+                "premise": ex["question"],
+                "hypothesis": ex["sentence"],
+                "label": int(ex["label"]),
+            }
+        )
+
+    if max_samples is not None and len(rows) > max_samples:
+        rng = __import__("random").Random(seed)
+        rng.shuffle(rows)
+        rows = rows[:max_samples]
+    return rows
+
+
+def _fill_winogrande_blank(sentence: str, option: str) -> str:
+    """Fill the first `_` slot (SuperGLUE / paper-style)."""
+    idx = sentence.index("_")
+    return sentence[:idx] + option + sentence[idx + 1 :]
+
+
+def _winogrande_gold_index(answer: str) -> int:
+    return 0 if str(answer).strip() == "1" else 1
+
+
+def _load_winogrande_rows(
+    split: str,
+    max_samples: Optional[int],
+    subset_guids: Optional[Set[str]],
+    seed: int,
+    config_name: str = "winogrande_xl",
+) -> List[Dict]:
+    """
+    Raw WinoGrande items (one row per prompt).
+
+  Training uses per-option binary rows (see _expand_winogrande_training_rows).
+    """
+    from datasets import load_dataset
+
+    hf_split = "train" if split == "train" else "validation"
+    ds = load_dataset("allenai/winogrande", config_name, split=hf_split)
+
+    rows: List[Dict] = []
+    for i, ex in enumerate(ds):
+        guid = f"winogrande-{hf_split}-{i:07d}"
+        if subset_guids is not None and guid not in subset_guids:
+            continue
+        rows.append(
+            {
+                "guid": guid,
+                "sentence": ex["sentence"],
+                "option1": ex["option1"],
+                "option2": ex["option2"],
+                "answer": str(ex["answer"]).strip(),
+            }
+        )
+
+    if max_samples is not None and len(rows) > max_samples:
+        rng = __import__("random").Random(seed)
+        rng.shuffle(rows)
+        rows = rows[:max_samples]
+    return rows
+
+
+class WinograndePairDataset(Dataset):
+    """One row per WinoGrande item; loss compares both filled sentences."""
+
+    def __init__(self, raw_rows: List[Dict]):
+        self.rows = raw_rows
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    def __getitem__(self, idx: int) -> Dict:
+        row = self.rows[idx]
+        sent = row["sentence"]
+        return {
+            "guid": row["guid"],
+            "text1": _fill_winogrande_blank(sent, row["option1"]),
+            "text2": _fill_winogrande_blank(sent, row["option2"]),
+            "label": _winogrande_gold_index(row["answer"]),
+        }
+
+
+def _collate_winogrande_pairs(batch: List[Dict], tokenizer, max_length: int) -> Dict:
+    texts1 = [b["text1"] for b in batch]
+    texts2 = [b["text2"] for b in batch]
+    enc1 = tokenizer(
+        texts1,
+        truncation=True,
+        max_length=max_length,
+        padding=True,
+        return_tensors="pt",
+    )
+    enc2 = tokenizer(
+        texts2,
+        truncation=True,
+        max_length=max_length,
+        padding=True,
+        return_tensors="pt",
+    )
+    return {
+        "input_ids1": enc1["input_ids"],
+        "attention_mask1": enc1["attention_mask"],
+        "input_ids2": enc2["input_ids"],
+        "attention_mask2": enc2["attention_mask"],
+        "labels": torch.tensor([b["label"] for b in batch], dtype=torch.long),
+        "guids": [b["guid"] for b in batch],
+    }
+
+
+def _winogrande_pair_logits(
+    model,
+    input_ids1: torch.Tensor,
+    attention_mask1: torch.Tensor,
+    input_ids2: torch.Tensor,
+    attention_mask2: torch.Tensor,
+) -> torch.Tensor:
+    """Per-item scores for option1 vs option2 (log-odds of class 1 on each fill)."""
+    logits1 = model(input_ids=input_ids1, attention_mask=attention_mask1).logits
+    logits2 = model(input_ids=input_ids2, attention_mask=attention_mask2).logits
+    s1 = logits1[:, 1] - logits1[:, 0]
+    s2 = logits2[:, 1] - logits2[:, 0]
+    return torch.stack([s1, s2], dim=1)
+
+
+def _load_dataset_rows(
+    dataset: str,
+    split: str,
+    max_samples: Optional[int],
+    subset_guids: Optional[Set[str]],
+    seed: int,
+    winogrande_config: str = "winogrande_xl",
+) -> List[Dict]:
+    d = dataset.lower()
+    if d == "snli":
+        return _load_snli_rows(split, max_samples, subset_guids, seed)
+    if d == "mnli":
+        return _load_mnli_rows(split, max_samples, subset_guids, seed)
+    if d == "qnli":
+        return _load_qnli_rows(split, max_samples, subset_guids, seed)
+    if d == "winogrande":
+        return _load_winogrande_rows(
+            split, max_samples, subset_guids, seed, config_name=winogrande_config
+        )
+    raise ValueError(f"unsupported dataset: {dataset}")
+
+
+def dataset_num_labels(dataset: str) -> int:
+    d = dataset.lower()
+    if d in ("snli", "mnli"):
+        return 3
+    if d in ("qnli", "winogrande"):
+        return 2
+    raise ValueError(f"unsupported dataset: {dataset}")
+
+
 def load_guids_from_jsonl(path: Path) -> Set[str]:
     guids: Set[str] = set()
     with path.open("r", encoding="utf-8") as f:
@@ -277,6 +488,22 @@ def _build_train_loader(
     )
 
 
+def _build_winogrande_pair_loader(
+    train_ds: WinograndePairDataset,
+    cfg: TrainConfig,
+    tokenizer,
+    device: torch.device,
+) -> DataLoader:
+    return DataLoader(
+        train_ds,
+        batch_size=cfg.batch_size,
+        shuffle=True,
+        num_workers=0,
+        pin_memory=device.type == "cuda",
+        collate_fn=lambda b: _collate_winogrande_pairs(b, tokenizer, cfg.max_length),
+    )
+
+
 def _train_epoch(
     model,
     loader: DataLoader,
@@ -327,7 +554,64 @@ def _train_epoch(
         total_loss += float(loss.item()) * grad_accum
         n_batches += 1
 
-    return total_loss / max(n_batches, 1)
+    optimizer_steps = max(0, n_batches // grad_accum)
+    if n_batches > 0 and n_batches % grad_accum != 0:
+        optimizer_steps += 1
+    return total_loss / max(n_batches, 1), optimizer_steps
+
+
+def _train_epoch_winogrande(
+    model,
+    loader: DataLoader,
+    optimizer,
+    scheduler,
+    device: torch.device,
+    scaler: Optional[torch.cuda.amp.GradScaler],
+    epoch: int,
+    grad_accum: int = 1,
+) -> float:
+    model.train()
+    total_loss = 0.0
+    n_batches = 0
+    optimizer.zero_grad(set_to_none=True)
+
+    for step, batch in enumerate(tqdm(loader, desc=f"train epoch {epoch}", leave=False)):
+        input_ids1 = batch["input_ids1"].to(device)
+        attention_mask1 = batch["attention_mask1"].to(device)
+        input_ids2 = batch["input_ids2"].to(device)
+        attention_mask2 = batch["attention_mask2"].to(device)
+        labels = batch["labels"].to(device)
+
+        if scaler is not None:
+            with torch.cuda.amp.autocast():
+                pair_logits = _winogrande_pair_logits(
+                    model, input_ids1, attention_mask1, input_ids2, attention_mask2
+                )
+                loss = F.cross_entropy(pair_logits, labels) / grad_accum
+            scaler.scale(loss).backward()
+        else:
+            pair_logits = _winogrande_pair_logits(
+                model, input_ids1, attention_mask1, input_ids2, attention_mask2
+            )
+            loss = F.cross_entropy(pair_logits, labels) / grad_accum
+            loss.backward()
+
+        if (step + 1) % grad_accum == 0:
+            if scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            scheduler.step()
+
+        total_loss += float(loss.item()) * grad_accum
+        n_batches += 1
+
+    optimizer_steps = max(0, n_batches // grad_accum)
+    if n_batches > 0 and n_batches % grad_accum != 0:
+        optimizer_steps += 1
+    return total_loss / max(n_batches, 1), optimizer_steps
 
 
 @torch.no_grad()
@@ -365,8 +649,13 @@ def _collect_epoch_predictions(
     return records
 
 
+PAPER_STYLE_DATASETS = frozenset({"snli", "mnli", "qnli", "winogrande"})
+
+
 @torch.no_grad()
 def _evaluate_accuracy(model, loader: DataLoader, device: torch.device) -> float:
+    if loader is None:
+        raise ValueError("val_loader is None; use dataset-specific evaluation (e.g. WinoGrande)")
     model.eval()
     correct = 0
     total = 0
@@ -381,17 +670,100 @@ def _evaluate_accuracy(model, loader: DataLoader, device: torch.device) -> float
     return correct / max(total, 1)
 
 
+@torch.no_grad()
+def _collect_winogrande_epoch_predictions(
+    model,
+    tokenizer,
+    raw_rows: List[Dict],
+    device: torch.device,
+    epoch: int,
+    max_length: int,
+) -> List[Dict]:
+    """One dynamics row per WinoGrande item using pairwise option probabilities."""
+    model.eval()
+    records: List[Dict] = []
+    loader = DataLoader(
+        WinograndePairDataset(raw_rows),
+        batch_size=64,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=device.type == "cuda",
+        collate_fn=lambda b: _collate_winogrande_pairs(b, tokenizer, max_length),
+    )
+    for batch in tqdm(loader, desc=f"collect epoch {epoch}", leave=False):
+        pair_logits = _winogrande_pair_logits(
+            model,
+            batch["input_ids1"].to(device),
+            batch["attention_mask1"].to(device),
+            batch["input_ids2"].to(device),
+            batch["attention_mask2"].to(device),
+        )
+        pair_probs = torch.softmax(pair_logits, dim=-1)
+        preds = pair_probs.argmax(dim=-1)
+        labels = batch["labels"]
+        guids = batch["guids"]
+        for i in range(len(guids)):
+            gold = int(labels[i].item())
+            pred = int(preds[i].item())
+            prob_gold = float(pair_probs[i, gold].item())
+            records.append(
+                {
+                    "guid": guids[i],
+                    "epoch": epoch,
+                    "gold_label": gold,
+                    "pred_label": pred,
+                    "prob_gold": round(prob_gold, 6),
+                }
+            )
+    return records
+
+
+@torch.no_grad()
+def _evaluate_winogrande_accuracy(
+    model,
+    tokenizer,
+    raw_rows: List[Dict],
+    device: torch.device,
+    max_length: int,
+) -> float:
+    if not raw_rows:
+        return 0.0
+    correct = 0
+    total = 0
+    loader = DataLoader(
+        WinograndePairDataset(raw_rows),
+        batch_size=64,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=device.type == "cuda",
+        collate_fn=lambda b: _collate_winogrande_pairs(b, tokenizer, max_length),
+    )
+    for batch in loader:
+        pair_logits = _winogrande_pair_logits(
+            model,
+            batch["input_ids1"].to(device),
+            batch["attention_mask1"].to(device),
+            batch["input_ids2"].to(device),
+            batch["attention_mask2"].to(device),
+        )
+        preds = pair_logits.argmax(dim=-1).cpu()
+        labels = batch["labels"]
+        correct += int((preds == labels).sum().item())
+        total += int(labels.size(0))
+    return correct / max(total, 1)
+
+
 def train_and_collect_dynamics(
     cfg: TrainConfig,
     wandb_run=None,
     metrics_log: Optional[Path] = None,
 ) -> Dict:
     """
-    Fine-tune on SNLI (train split), log gold-label probability after each epoch.
+    Fine-tune on SNLI or WinoGrande, log gold-label probability after each epoch.
     Optional dynamic snapshots + curriculum reweighting (Idea #2).
     """
-    if cfg.dataset.lower() != "snli":
-        raise ValueError("only dataset=snli is implemented in glue_trainer")
+    if cfg.dataset.lower() not in ("snli", "mnli", "qnli", "winogrande"):
+        raise ValueError("dataset must be snli, mnli, qnli, or winogrande")
 
     from ml_cartography.training.ministral3_snli import (
         is_ministral3_model,
@@ -407,44 +779,57 @@ def train_and_collect_dynamics(
     scaler = torch.cuda.amp.GradScaler() if use_fp16 else None
     grad_accum = max(1, cfg.gradient_accumulation_steps)
 
-    train_rows = _load_snli_rows(
+    is_winogrande = cfg.dataset.lower() == "winogrande"
+    if is_winogrande and cfg.max_length == 128:
+        cfg.max_length = 256
+
+    train_raw = _load_dataset_rows(
+        cfg.dataset,
         "train",
         cfg.max_train_samples,
         cfg.subset_guids,
         cfg.seed,
+        winogrande_config=cfg.winogrande_config,
     )
-    val_rows = _load_snli_rows(
+    val_raw = _load_dataset_rows(
+        cfg.dataset,
         "validation",
         cfg.max_eval_samples,
         None,
         cfg.seed,
+        winogrande_config=cfg.winogrande_config,
     )
-    if not train_rows:
+    if not train_raw:
         raise ValueError("no training examples after filtering; check subset guids")
 
-    num_labels = 3
+    num_labels = 2 if is_winogrande else dataset_num_labels(cfg.dataset)
     model, tokenizer = _load_model_and_tokenizer(cfg, num_labels)
     if not cfg.load_in_4bit:
         model.to(device)
 
-    train_ds = NliDataset(train_rows, tokenizer, cfg.max_length)
-    val_ds = NliDataset(val_rows, tokenizer, cfg.max_length)
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=cfg.eval_batch_size,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=device.type == "cuda",
-    )
-    collect_loader = DataLoader(
-        train_ds,
-        batch_size=cfg.eval_batch_size,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=device.type == "cuda",
-    )
-
-    train_guids = [r["guid"] for r in train_rows]
+    if is_winogrande:
+        train_ds = WinograndePairDataset(train_raw)
+        val_loader = None
+        collect_loader = None
+        train_guids = [r["guid"] for r in train_raw]
+    else:
+        train_ds = NliDataset(train_raw, tokenizer, cfg.max_length)
+        val_ds = NliDataset(val_raw, tokenizer, cfg.max_length)
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=cfg.eval_batch_size,
+            shuffle=False,
+            num_workers=0,
+            pin_memory=device.type == "cuda",
+        )
+        collect_loader = DataLoader(
+            train_ds,
+            batch_size=cfg.eval_batch_size,
+            shuffle=False,
+            num_workers=0,
+            pin_memory=device.type == "cuda",
+        )
+        train_guids = [r["guid"] for r in train_raw]
     sample_weights: Optional[List[float]] = None
     snapshot_dir = cfg.snapshot_dir
     if snapshot_dir:
@@ -453,9 +838,17 @@ def train_and_collect_dynamics(
     cfg.output_logs.parent.mkdir(parents=True, exist_ok=True)
     all_records: List[Dict] = []
     snapshot_paths: List[Tuple[int, Path]] = []
+    prev_snapshot_coords: Optional[List[Dict]] = None
+    cumulative_optimizer_steps = 0
+    cumulative_param_units = 0.0
+    idea2_metric_history: List[Dict] = []
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     for epoch in range(1, cfg.epochs + 1):
-        train_loader = _build_train_loader(train_ds, cfg, sample_weights, device)
+        if is_winogrande:
+            train_loader = _build_winogrande_pair_loader(train_ds, cfg, tokenizer, device)
+        else:
+            train_loader = _build_train_loader(train_ds, cfg, sample_weights, device)
         total_steps = (len(train_loader) // grad_accum) * (cfg.epochs - epoch + 1)
         warmup_steps = int(total_steps * cfg.warmup_ratio)
         optimizer = torch.optim.AdamW(
@@ -466,32 +859,100 @@ def train_and_collect_dynamics(
             optimizer, warmup_steps, max(total_steps, 1)
         )
 
-        train_loss = _train_epoch(
-            model,
-            train_loader,
-            optimizer,
-            scheduler,
-            device,
-            scaler,
-            epoch,
-            grad_accum=grad_accum,
-        )
-        val_acc = _evaluate_accuracy(model, val_loader, device)
-        epoch_records = _collect_epoch_predictions(
-            model, collect_loader, device, epoch
-        )
+        if is_winogrande:
+            train_loss, optimizer_steps = _train_epoch_winogrande(
+                model,
+                train_loader,
+                optimizer,
+                scheduler,
+                device,
+                scaler,
+                epoch,
+                grad_accum=grad_accum,
+            )
+        else:
+            train_loss, optimizer_steps = _train_epoch(
+                model,
+                train_loader,
+                optimizer,
+                scheduler,
+                device,
+                scaler,
+                epoch,
+                grad_accum=grad_accum,
+            )
+        cumulative_optimizer_steps += optimizer_steps
+        param_units = optimizer_steps * trainable_params
+        cumulative_param_units += param_units
+        if is_winogrande:
+            val_acc = _evaluate_winogrande_accuracy(
+                model, tokenizer, val_raw, device, cfg.max_length
+            )
+            epoch_records = _collect_winogrande_epoch_predictions(
+                model, tokenizer, train_raw, device, epoch, cfg.max_length
+            )
+        else:
+            val_acc = _evaluate_accuracy(model, val_loader, device)
+            epoch_records = _collect_epoch_predictions(
+                model, collect_loader, device, epoch
+            )
         all_records.extend(epoch_records)
 
+        coords = records_to_coordinates(all_records, max_epoch=epoch)
         if cfg.dynamic_snapshots and snapshot_dir:
-            coords = records_to_coordinates(all_records, max_epoch=epoch)
             snap_path = save_snapshot(coords, snapshot_dir, epoch)
             snapshot_paths.append((epoch, snap_path))
+
+        movement_log: Dict[str, float] = {}
+        if cfg.dynamic_snapshots:
+            from ml_cartography.analysis.movement_metrics import (
+                compute_epoch_movement,
+                compute_learnability_efficiency,
+                save_learnability_vs_compute_plot,
+                save_transition_heatmap,
+                strip_internal_keys,
+            )
+
+            movement = compute_epoch_movement(prev_snapshot_coords, coords)
+            transition = movement.pop("_transition_matrix", None)
+            delta_learn = float(
+                movement.get("learnability/delta", movement.get("learnability/index", 0.0))
+            )
+            movement.update(
+                compute_learnability_efficiency(
+                    delta_learnability=delta_learn,
+                    optimizer_steps=optimizer_steps,
+                    trainable_params=trainable_params,
+                    batch_size=cfg.batch_size,
+                    seq_length=cfg.max_length,
+                )
+            )
+            movement["compute/cumulative_optimizer_steps"] = float(cumulative_optimizer_steps)
+            movement["compute/cumulative_param_update_units"] = float(cumulative_param_units)
+            idea2_metric_history.append(dict(movement))
+            movement_log = strip_internal_keys(movement)
+            if transition is not None and epoch > 1 and snapshot_dir:
+                save_transition_heatmap(
+                    transition,
+                    snapshot_dir / f"epoch_{epoch:03d}_region_transition.png",
+                    title=f"Region transitions → epoch {epoch}",
+                )
+            if snapshot_dir:
+                save_learnability_vs_compute_plot(
+                    idea2_metric_history,
+                    snapshot_dir / "learnability_vs_compute.png",
+                )
+            prev_snapshot_coords = coords
 
         metric_row = {
             "epoch": epoch,
             "train_loss": train_loss,
             "val_accuracy": val_acc,
             "num_prediction_rows": len(epoch_records),
+            "compute/optimizer_steps_epoch": optimizer_steps,
+            "compute/cumulative_optimizer_steps": cumulative_optimizer_steps,
+            "compute/cumulative_param_update_units": cumulative_param_units,
+            **movement_log,
         }
         if metrics_log:
             append_training_metric(metrics_log, metric_row)
@@ -500,13 +961,28 @@ def train_and_collect_dynamics(
             import wandb
 
             log_payload = dict(metric_row)
-            if snapshot_dir and (snapshot_dir / f"epoch_{epoch:03d}_coordinates.jsonl").is_file():
+            if snapshot_dir:
                 from ml_cartography.analysis.data_map import save_data_map_plot
 
                 plot_path = snapshot_dir / f"epoch_{epoch:03d}_data_map.png"
-                coords = records_to_coordinates(all_records, max_epoch=epoch)
-                save_data_map_plot(coords, plot_path)
+                paper_style = cfg.dataset.lower() in PAPER_STYLE_DATASETS
+                map_title = f"{cfg.dataset.upper()} data map (through epoch {epoch})"
+                save_data_map_plot(
+                    coords,
+                    plot_path,
+                    color_by="correctness" if paper_style else "region",
+                    title=map_title,
+                )
                 log_payload[f"data_map_epoch_{epoch}"] = wandb.Image(str(plot_path))
+                if epoch > 1:
+                    heatmap = snapshot_dir / f"epoch_{epoch:03d}_region_transition.png"
+                    if heatmap.is_file():
+                        log_payload[f"idea2/region_transition_epoch_{epoch}"] = wandb.Image(
+                            str(heatmap)
+                        )
+                eff_plot = snapshot_dir / "learnability_vs_compute.png"
+                if eff_plot.is_file():
+                    log_payload["idea2/learnability_vs_compute"] = wandb.Image(str(eff_plot))
             wandb.log(log_payload, step=epoch)
 
         if cfg.checkpoint_dir:
@@ -551,11 +1027,16 @@ def train_and_collect_dynamics(
             print(f"using device: {device}")
     summary = {
         "device": str(device),
+        "dataset": cfg.dataset,
         "model_name": cfg.model_name,
-        "num_train": len(train_rows),
-        "num_val": len(val_rows),
+        "num_train": len(train_raw),
+        "num_val": len(val_raw),
         "epochs": cfg.epochs,
-        "final_val_accuracy": _evaluate_accuracy(model, val_loader, device),
+        "final_val_accuracy": (
+            _evaluate_winogrande_accuracy(model, tokenizer, val_raw, device, cfg.max_length)
+            if is_winogrande
+            else _evaluate_accuracy(model, val_loader, device)
+        ),
         "output_logs": str(cfg.output_logs),
         "num_log_rows": len(all_records),
         "snapshot_dir": str(snapshot_dir) if snapshot_dir else None,

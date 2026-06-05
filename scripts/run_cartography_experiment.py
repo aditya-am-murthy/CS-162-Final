@@ -84,7 +84,13 @@ def _collect_dynamics_from_logs(log_path: Path) -> list[dict]:
     return [summarize_record(r) for r in records.values()]
 
 
-def _build_figures(exp: ExperimentPaths, coordinates: list[dict], task: str) -> None:
+def _build_figures(
+    exp: ExperimentPaths,
+    coordinates: list[dict],
+    task: str,
+    *,
+    dataset: str = "snli",
+) -> None:
     if task == "preference":
         tagged = annotate_preference_regions(coordinates)
         plot_path = exp.figures_dir / "preference_data_map.png"
@@ -92,9 +98,25 @@ def _build_figures(exp: ExperimentPaths, coordinates: list[dict], task: str) -> 
         write_jsonl(exp.regions_path(), tagged)
     else:
         tagged = annotate_regions(coordinates)
-        plot_path = exp.figures_dir / "data_map.png"
-        save_data_map_plot(tagged, plot_path)
         write_jsonl(exp.regions_path(), tagged)
+        plot_path = exp.figures_dir / "data_map.png"
+        paper_datasets = ("snli", "mnli", "qnli", "winogrande")
+        color_by = "correctness" if dataset in paper_datasets else "region"
+        titles = {
+            "snli": "SNLI Data Map (paper-style)",
+            "mnli": "MultiNLI Data Map (paper-style)",
+            "qnli": "QNLI Data Map (paper-style)",
+            "winogrande": "WinoGrande Data Map (paper-style)",
+        }
+        title = titles.get(dataset, "Dataset Cartography Data Map")
+        save_data_map_plot(tagged, plot_path, color_by=color_by, title=title)
+        if dataset in paper_datasets:
+            save_data_map_plot(
+                tagged,
+                exp.figures_dir / "data_map_regions.png",
+                color_by="region",
+                title=f"{title} (by region)",
+            )
 
     region_counts = Counter(r["region"] for r in tagged)
     with (exp.figures_dir / "region_counts.json").open("w", encoding="utf-8") as f:
@@ -122,6 +144,17 @@ def main() -> None:
         default="snli",
     )
     parser.add_argument("--preset", choices=list(MODEL_PRESETS.keys()), default="distilbert")
+    parser.add_argument(
+        "--dataset",
+        choices=["snli", "mnli", "qnli", "winogrande"],
+        default="snli",
+        help="Paper datasets: snli, mnli, qnli, winogrande",
+    )
+    parser.add_argument(
+        "--winogrande-config",
+        default="winogrande_xl",
+        help="HF config for allenai/winogrande",
+    )
     parser.add_argument("--model-name", default=None)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=None)
@@ -135,16 +168,23 @@ def main() -> None:
     args = parser.parse_args()
 
     model_name = args.model_name or MODEL_PRESETS[args.preset]
-    task_slug = f"{args.task}_{args.preset}"
+    slug_parts = [args.task]
+    if args.dataset != "snli":
+        slug_parts.append(args.dataset)
+    slug_parts.append(args.preset)
+    task_slug = "_".join(slug_parts)
     exp = ExperimentPaths.create(task_slug=task_slug, run_id=args.run_id)
 
     config = {
         "task": args.task,
+        "dataset": args.dataset,
         "preset": args.preset,
         "model_name": model_name,
         "epochs": args.epochs,
         "max_train_samples": args.max_train_samples,
     }
+    if args.dataset == "winogrande":
+        config["winogrande_config"] = args.winogrande_config
     exp.write_config(config)
 
     init_wandb(
@@ -160,6 +200,7 @@ def main() -> None:
     summary = {}
     if args.task in ("snli", "dynamic"):
         cfg = TrainConfig(
+            dataset=args.dataset,
             model_name=model_name,
             epochs=args.epochs,
             max_train_samples=args.max_train_samples,
@@ -167,8 +208,9 @@ def main() -> None:
             output_logs=exp.epoch_logs_path(),
             checkpoint_dir=exp.checkpoints_dir,
             snapshot_dir=exp.snapshots_dir,
-            dynamic_snapshots=True,
+            dynamic_snapshots=args.task == "dynamic",
             curriculum_after_epoch=args.curriculum_after_epoch if args.task == "dynamic" else 0,
+            winogrande_config=args.winogrande_config,
         )
         if args.batch_size is None:
             cfg = apply_preset_defaults(cfg, args.preset)
@@ -192,9 +234,43 @@ def main() -> None:
                 trajectories = build_region_trajectories(pairs)
                 write_jsonl(exp.trajectories_path(), trajectories)
                 if wandb_run:
+                    from ml_cartography.analysis.movement_metrics import (
+                        save_learnability_vs_compute_plot,
+                        summarize_trajectories,
+                    )
+
+                    traj_summary = summarize_trajectories(trajectories)
+                    wandb.log(traj_summary)
+                    metrics_path = exp.training_metrics_path()
+                    if metrics_path.is_file():
+                        history = []
+                        with metrics_path.open("r", encoding="utf-8") as f:
+                            for line in f:
+                                if not line.strip():
+                                    continue
+                                row = json.loads(line)
+                                subset = {
+                                    k: v
+                                    for k, v in row.items()
+                                    if k.startswith(
+                                        ("movement/", "learnability/", "compute/", "region_frac/")
+                                    )
+                                }
+                                if subset:
+                                    history.append(subset)
+                        if history:
+                            final_plot = exp.figures_dir / "idea2_learnability_vs_compute_final.png"
+                            save_learnability_vs_compute_plot(history, final_plot)
+                            wandb.log(
+                                {
+                                    "idea2/final_learnability_vs_compute": wandb.Image(
+                                        str(final_plot)
+                                    )
+                                }
+                            )
                     wandb.log({"num_trajectory_examples": len(trajectories)})
 
-        _build_figures(exp, coordinates, task="snli")
+        _build_figures(exp, coordinates, task="snli", dataset=args.dataset)
         tagged = read_jsonl(exp.regions_path())
         subset_path = _export_high_variability_subset(exp, tagged)
         summary["high_variability_subset"] = str(subset_path)
@@ -234,7 +310,7 @@ def main() -> None:
         )
         coordinates = _collect_dynamics_from_logs(exp.epoch_logs_path())
         write_jsonl(exp.coordinates_path(), coordinates)
-        _build_figures(exp, coordinates, task="snli")
+        _build_figures(exp, coordinates, task="snli", dataset=args.dataset)
 
     manifest = {
         "run_id": exp.run_id,

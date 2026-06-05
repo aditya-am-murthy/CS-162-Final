@@ -1,8 +1,12 @@
 #Directories
 docs/local-docs/*
 data/*
-results/*/*
-results/*.json
+results/*
+unsloth_compiled_cache/*
+unsloth_compiled_cache
+unsloth_compiled_cache/*.py
+logs/*
+logs/*.log
 
 #caches
 **/__pycache__/*
@@ -21,3 +25,4 @@ wandb/
 # large experiment artifacts (timestamped copies also go to results/<run_id>/)
 experiments/runs/*
 !experiments/runs/.gitkeep
+results/report.md
