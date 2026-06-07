@@ -8,10 +8,10 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from tqdm import tqdm
 from transformers import (
+    AutoModelForMultipleChoice,
     AutoModelForSequenceClassification,
     AutoTokenizer,
     get_linear_schedule_with_warmup,
@@ -260,7 +260,7 @@ def _load_winogrande_rows(
     """
     Raw WinoGrande items (one row per prompt).
 
-  Training uses per-option binary rows (see _expand_winogrande_training_rows).
+  Make sure training uses per-option binary rows
     """
     from datasets import load_dataset
 
@@ -310,45 +310,24 @@ class WinograndePairDataset(Dataset):
 
 
 def _collate_winogrande_pairs(batch: List[Dict], tokenizer, max_length: int) -> Dict:
-    texts1 = [b["text1"] for b in batch]
-    texts2 = [b["text2"] for b in batch]
-    enc1 = tokenizer(
-        texts1,
+    flat_texts = [choice for b in batch for choice in (b["text1"], b["text2"])]
+    enc = tokenizer(
+        flat_texts,
         truncation=True,
         max_length=max_length,
         padding=True,
         return_tensors="pt",
     )
-    enc2 = tokenizer(
-        texts2,
-        truncation=True,
-        max_length=max_length,
-        padding=True,
-        return_tensors="pt",
-    )
-    return {
-        "input_ids1": enc1["input_ids"],
-        "attention_mask1": enc1["attention_mask"],
-        "input_ids2": enc2["input_ids"],
-        "attention_mask2": enc2["attention_mask"],
+
+    collated = {
         "labels": torch.tensor([b["label"] for b in batch], dtype=torch.long),
         "guids": [b["guid"] for b in batch],
     }
-
-
-def _winogrande_pair_logits(
-    model,
-    input_ids1: torch.Tensor,
-    attention_mask1: torch.Tensor,
-    input_ids2: torch.Tensor,
-    attention_mask2: torch.Tensor,
-) -> torch.Tensor:
-    """Per-item scores for option1 vs option2 (log-odds of class 1 on each fill)."""
-    logits1 = model(input_ids=input_ids1, attention_mask=attention_mask1).logits
-    logits2 = model(input_ids=input_ids2, attention_mask=attention_mask2).logits
-    s1 = logits1[:, 1] - logits1[:, 0]
-    s2 = logits2[:, 1] - logits2[:, 0]
-    return torch.stack([s1, s2], dim=1)
+    num_choices = 2
+    batch_size = len(batch)
+    for key, value in enc.items():
+        collated[key] = value.view(batch_size, num_choices, -1)
+    return collated
 
 
 def _load_dataset_rows(
@@ -432,11 +411,18 @@ def resolve_config_hidden_size(config) -> int:
     raise AttributeError(f"cannot find hidden_size on {type(config).__name__}")
 
 
-def _load_model_and_tokenizer(cfg: TrainConfig, num_labels: int):
+def _load_model_and_tokenizer(
+    cfg: TrainConfig,
+    num_labels: int,
+    *,
+    is_winogrande: bool = False,
+):
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name, use_fast=True)
     ensure_padding_token(tokenizer)
 
-    model_kwargs: Dict = {"num_labels": num_labels}
+    model_kwargs: Dict = {}
+    if not is_winogrande:
+        model_kwargs["num_labels"] = num_labels
     if tokenizer.pad_token_id is not None:
         model_kwargs["pad_token_id"] = tokenizer.pad_token_id
     if cfg.load_in_4bit and not _is_prequantized_checkpoint(cfg.model_name):
@@ -450,10 +436,16 @@ def _load_model_and_tokenizer(cfg: TrainConfig, num_labels: int):
         )
         model_kwargs["device_map"] = "auto"
 
-    model = AutoModelForSequenceClassification.from_pretrained(
-        cfg.model_name,
-        **model_kwargs,
-    )
+    if is_winogrande:
+        model = AutoModelForMultipleChoice.from_pretrained(
+            cfg.model_name,
+            **model_kwargs,
+        )
+    else:
+        model = AutoModelForSequenceClassification.from_pretrained(
+            cfg.model_name,
+            **model_kwargs,
+        )
     ensure_padding_token(tokenizer, model)
     if cfg.gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
@@ -577,24 +569,21 @@ def _train_epoch_winogrande(
     optimizer.zero_grad(set_to_none=True)
 
     for step, batch in enumerate(tqdm(loader, desc=f"train epoch {epoch}", leave=False)):
-        input_ids1 = batch["input_ids1"].to(device)
-        attention_mask1 = batch["attention_mask1"].to(device)
-        input_ids2 = batch["input_ids2"].to(device)
-        attention_mask2 = batch["attention_mask2"].to(device)
         labels = batch["labels"].to(device)
+        model_inputs = {
+            key: value.to(device)
+            for key, value in batch.items()
+            if key not in {"labels", "guids"}
+        }
 
         if scaler is not None:
             with torch.cuda.amp.autocast():
-                pair_logits = _winogrande_pair_logits(
-                    model, input_ids1, attention_mask1, input_ids2, attention_mask2
-                )
-                loss = F.cross_entropy(pair_logits, labels) / grad_accum
+                out = model(**model_inputs, labels=labels)
+                loss = out.loss / grad_accum
             scaler.scale(loss).backward()
         else:
-            pair_logits = _winogrande_pair_logits(
-                model, input_ids1, attention_mask1, input_ids2, attention_mask2
-            )
-            loss = F.cross_entropy(pair_logits, labels) / grad_accum
+            out = model(**model_inputs, labels=labels)
+            loss = out.loss / grad_accum
             loss.backward()
 
         if (step + 1) % grad_accum == 0:
@@ -680,7 +669,9 @@ def _collect_winogrande_epoch_predictions(
     epoch: int,
     max_length: int,
 ) -> List[Dict]:
-    """One dynamics row per WinoGrande item using pairwise option probabilities."""
+    """
+    Have just one dynamics row per WinoGrande item using pairwise option probabilities --> following paper
+    """
     model.eval()
     records: List[Dict] = []
     loader = DataLoader(
@@ -692,21 +683,20 @@ def _collect_winogrande_epoch_predictions(
         collate_fn=lambda b: _collate_winogrande_pairs(b, tokenizer, max_length),
     )
     for batch in tqdm(loader, desc=f"collect epoch {epoch}", leave=False):
-        pair_logits = _winogrande_pair_logits(
-            model,
-            batch["input_ids1"].to(device),
-            batch["attention_mask1"].to(device),
-            batch["input_ids2"].to(device),
-            batch["attention_mask2"].to(device),
-        )
-        pair_probs = torch.softmax(pair_logits, dim=-1)
-        preds = pair_probs.argmax(dim=-1)
+        model_inputs = {
+            key: value.to(device)
+            for key, value in batch.items()
+            if key not in {"labels", "guids"}
+        }
+        choice_logits = model(**model_inputs).logits
+        choice_probs = torch.softmax(choice_logits, dim=-1)
+        preds = choice_probs.argmax(dim=-1)
         labels = batch["labels"]
         guids = batch["guids"]
         for i in range(len(guids)):
             gold = int(labels[i].item())
             pred = int(preds[i].item())
-            prob_gold = float(pair_probs[i, gold].item())
+            prob_gold = float(choice_probs[i, gold].item())
             records.append(
                 {
                     "guid": guids[i],
@@ -740,14 +730,12 @@ def _evaluate_winogrande_accuracy(
         collate_fn=lambda b: _collate_winogrande_pairs(b, tokenizer, max_length),
     )
     for batch in loader:
-        pair_logits = _winogrande_pair_logits(
-            model,
-            batch["input_ids1"].to(device),
-            batch["attention_mask1"].to(device),
-            batch["input_ids2"].to(device),
-            batch["attention_mask2"].to(device),
-        )
-        preds = pair_logits.argmax(dim=-1).cpu()
+        model_inputs = {
+            key: value.to(device)
+            for key, value in batch.items()
+            if key not in {"labels", "guids"}
+        }
+        preds = model(**model_inputs).logits.argmax(dim=-1).cpu()
         labels = batch["labels"]
         correct += int((preds == labels).sum().item())
         total += int(labels.size(0))
@@ -804,7 +792,11 @@ def train_and_collect_dynamics(
         raise ValueError("no training examples after filtering; check subset guids")
 
     num_labels = 2 if is_winogrande else dataset_num_labels(cfg.dataset)
-    model, tokenizer = _load_model_and_tokenizer(cfg, num_labels)
+    model, tokenizer = _load_model_and_tokenizer(
+        cfg,
+        num_labels,
+        is_winogrande=is_winogrande,
+    )
     if not cfg.load_in_4bit:
         model.to(device)
 
