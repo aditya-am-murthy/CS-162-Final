@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
-"""
-Fine-tune a transformer and write per-epoch prediction logs for cartography.
 
-For full pipeline (snapshots, results/<timestamp>/, W&B figures), prefer:
-  python scripts/run_cartography_experiment.py --task snli --preset distilbert
-
-Multi-model Colab suite:
-  python scripts/train_all_models.py
-
-Examples:
-  python scripts/train_and_collect_dynamics.py --preset distilbert --max-train-samples 2000 --epochs 3
-  python scripts/train_and_collect_dynamics.py --preset llama-3.2-1b --max-train-samples 5000
-"""
 
 from __future__ import annotations
 
