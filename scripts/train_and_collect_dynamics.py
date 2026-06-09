@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
-"""
-Fine-tune a transformer on SNLI and write per-epoch prediction logs for cartography.
 
-For full pipeline (snapshots, results/<timestamp>/, W&B figures), prefer:
-  python scripts/run_cartography_experiment.py --task snli --preset distilbert
-
-Multi-model Colab suite:
-  python scripts/train_all_models.py
-
-Examples:
-  python scripts/train_and_collect_dynamics.py --preset distilbert --max-train-samples 2000 --epochs 3
-  python scripts/train_and_collect_dynamics.py --preset llama-3.2-1b --max-train-samples 5000
-"""
 
 from __future__ import annotations
 
@@ -38,7 +26,7 @@ from scripts.common import (
     finish_wandb,
     init_wandb,
     load_hf_credentials,
-    load_pipeline_config,
+    use_wandb,
 )
 
 
@@ -53,8 +41,18 @@ def main() -> None:
     )
     parser.add_argument("--no-4bit", action="store_true", help="Disable 4-bit for large models")
     parser.add_argument("--model-name", default=None, help="Override HuggingFace model id")
-    parser.add_argument("--dataset", default="snli", choices=["snli"])
+    parser.add_argument(
+        "--dataset",
+        default="snli",
+        choices=["snli", "mnli", "qnli", "winogrande"],
+    )
+    parser.add_argument(
+        "--winogrande-config",
+        default="winogrande_xl",
+        help="HF config for allenai/winogrande",
+    )
     parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--learning-rate", type=float, default=2e-5)
     parser.add_argument(
@@ -80,6 +78,7 @@ def main() -> None:
 
     model_name = args.model_name or MODEL_PRESETS[args.preset]
     max_train = None if args.max_train_samples == 0 else args.max_train_samples
+    max_eval = None if args.max_eval_samples == 0 else args.max_eval_samples
 
     output = args.output
     if output is None:
@@ -93,15 +92,17 @@ def main() -> None:
         dataset=args.dataset,
         model_name=model_name,
         max_train_samples=max_train,
-        max_eval_samples=args.max_eval_samples,
+        max_eval_samples=max_eval,
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         max_length=args.max_length,
+        seed=args.seed,
         fp16=not args.no_fp16,
         output_logs=output,
         checkpoint_dir=args.checkpoint_dir,
         subset_guids=subset_guids,
+        winogrande_config=args.winogrande_config,
     )
     cfg = apply_preset_defaults(cfg, args.preset)
     if args.no_4bit:
@@ -130,9 +131,11 @@ def main() -> None:
         job_type="train_collect_dynamics",
         config={
             "model": cfg.model_name,
+            "dataset": cfg.dataset,
             "epochs": cfg.epochs,
             "max_train_samples": cfg.max_train_samples,
             "subset_file": str(args.subset_file) if args.subset_file else None,
+            "seed": cfg.seed,
         },
     )
 

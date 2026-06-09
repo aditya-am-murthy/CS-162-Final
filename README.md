@@ -55,6 +55,7 @@ conda activate cs162-cartography
 | `scripts/05_uncertainty_checks.py` | §6 | Spearman vs human agreement / dropout proxy |
 | `scripts/06_ambiguous_ablation.py` | §4 | Ambiguous-only sweeps + easy replacement |
 | `scripts/07_generate_insight_figures.py` | §2–§6 | Paper-style figures → `results/` |
+| `scripts/08_role_easy_to_learn.py` | §4 | WinoGrande ambiguous-size sweep + random baselines + easy replacements |
 | `scripts/run_all_experiments.py` | all | Runs the full pipeline |
 
 Run everything (monitor on [wandb.ai](https://wandb.ai)):
@@ -75,7 +76,12 @@ python scripts/03_select_subsets.py --run-all-strategies
 python scripts/04_detect_mislabeled.py
 python scripts/05_uncertainty_checks.py
 python scripts/06_ambiguous_ablation.py
+python scripts/08_role_easy_to_learn.py --no-wandb
 ```
+
+For the WinoGrande easy-to-learn experiment, the default command exports subset
+files plus `data/processed/easy_role/train_commands.sh`. Add `--train` to launch
+the retraining sweep from the same script.
 
 ## GPU training (real dynamics)
 
