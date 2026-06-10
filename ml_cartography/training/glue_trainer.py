@@ -962,29 +962,43 @@ def train_and_collect_dynamics(
         if metrics_log:
             append_training_metric(metrics_log, metric_row)
 
+        epoch_figure_paths: List[Path] = []
+        if snapshot_dir:
+            from ml_cartography.analysis.data_map import save_data_map_plot
+
+            paper_style = cfg.dataset.lower() in PAPER_STYLE_DATASETS
+            map_title = f"{cfg.dataset.upper()} data map (through epoch {epoch})"
+            correctness_path = snapshot_dir / f"epoch_{epoch:03d}_data_map_correctness.png"
+            save_data_map_plot(
+                coords,
+                correctness_path,
+                color_by="correctness" if paper_style else "region",
+                title=map_title,
+            )
+            epoch_figure_paths.append(correctness_path)
+            if paper_style:
+                regions_path = snapshot_dir / f"epoch_{epoch:03d}_data_map_regions.png"
+                save_data_map_plot(
+                    coords,
+                    regions_path,
+                    color_by="region",
+                    title=f"{map_title} (by region)",
+                )
+                epoch_figure_paths.append(regions_path)
+
         if wandb_run is not None:
             import wandb
 
             log_payload = dict(metric_row)
+            for fig_path in epoch_figure_paths:
+                log_payload[f"charts/{fig_path.stem}"] = wandb.Image(str(fig_path))
+            if epoch > 1 and snapshot_dir:
+                heatmap = snapshot_dir / f"epoch_{epoch:03d}_region_transition.png"
+                if heatmap.is_file():
+                    log_payload[f"idea2/region_transition_epoch_{epoch}"] = wandb.Image(
+                        str(heatmap)
+                    )
             if snapshot_dir:
-                from ml_cartography.analysis.data_map import save_data_map_plot
-
-                plot_path = snapshot_dir / f"epoch_{epoch:03d}_data_map.png"
-                paper_style = cfg.dataset.lower() in PAPER_STYLE_DATASETS
-                map_title = f"{cfg.dataset.upper()} data map (through epoch {epoch})"
-                save_data_map_plot(
-                    coords,
-                    plot_path,
-                    color_by="correctness" if paper_style else "region",
-                    title=map_title,
-                )
-                log_payload[f"data_map_epoch_{epoch}"] = wandb.Image(str(plot_path))
-                if epoch > 1:
-                    heatmap = snapshot_dir / f"epoch_{epoch:03d}_region_transition.png"
-                    if heatmap.is_file():
-                        log_payload[f"idea2/region_transition_epoch_{epoch}"] = wandb.Image(
-                            str(heatmap)
-                        )
                 eff_plot = snapshot_dir / "learnability_vs_compute.png"
                 if eff_plot.is_file():
                     log_payload["idea2/learnability_vs_compute"] = wandb.Image(str(eff_plot))
