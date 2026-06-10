@@ -4,4 +4,4 @@ scikit-learn
 scipy
 tqdm
 wandb
-
+streamlit

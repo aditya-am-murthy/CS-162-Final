@@ -43,6 +43,18 @@ conda activate cs162-cartography
 
 `requirements.txt` mirrors pip-only deps for non-conda installs.
 
+## Streamlit App
+
+First install the base dependencies, then launch the read-only results explorer:
+
+```bash
+conda activate cs162-cartography
+pip install -r requirements.txt
+streamlit run apps/streamlit_app.py
+```
+
+The app will read the published experiment values from `results/<run_id>/`.
+
 ## Experiment Scripts (maps to `docs/local-docs/experiments.md`)
 
 | Script | Paper section | What it does |
