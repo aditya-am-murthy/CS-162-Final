@@ -128,6 +128,11 @@ def add_wandb_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--wandb-run-name", default=None, help="Optional W&B run name")
     parser.add_argument(
+        "--wandb-group",
+        default=None,
+        help="Optional W&B group to link related runs",
+    )
+    parser.add_argument(
         "--wandb-entity",
         default=None,
         help="Optional W&B entity (team or user)",
@@ -164,10 +169,12 @@ def init_wandb(
     project = args.wandb_project or creds.get("project", "cs162-dataset-cartography")
     entity = args.wandb_entity or creds.get("entity")
 
+    group = getattr(args, "wandb_group", None)
     return wandb.init(
         project=project,
         name=args.wandb_run_name or job_type,
         entity=entity,
+        group=group,
         job_type=job_type,
         config=config or {},
     )

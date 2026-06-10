@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
-"""
-Fine-tune a transformer on SNLI and write per-epoch prediction logs for cartography.
 
-For full pipeline (snapshots, results/<timestamp>/, W&B figures), prefer:
-  python scripts/run_cartography_experiment.py --task snli --preset distilbert
-
-Multi-model Colab suite:
-  python scripts/train_all_models.py
-
-Examples:
-  python scripts/train_and_collect_dynamics.py --preset distilbert --max-train-samples 2000 --epochs 3
-  python scripts/train_and_collect_dynamics.py --preset llama-3.2-1b --max-train-samples 5000
-"""
 
 from __future__ import annotations
 
@@ -24,7 +12,9 @@ if str(_root) not in sys.path:
 
 import argparse
 import json
+from types import SimpleNamespace
 
+from ml_cartography.analysis.training_plots import save_training_curve_plot
 from ml_cartography.training.glue_trainer import (
     MODEL_PRESETS,
     TrainConfig,
@@ -38,7 +28,7 @@ from scripts.common import (
     finish_wandb,
     init_wandb,
     load_hf_credentials,
-    load_pipeline_config,
+    use_wandb,
 )
 
 
@@ -53,8 +43,18 @@ def main() -> None:
     )
     parser.add_argument("--no-4bit", action="store_true", help="Disable 4-bit for large models")
     parser.add_argument("--model-name", default=None, help="Override HuggingFace model id")
-    parser.add_argument("--dataset", default="snli", choices=["snli"])
+    parser.add_argument(
+        "--dataset",
+        default="snli",
+        choices=["snli", "mnli", "qnli", "winogrande"],
+    )
+    parser.add_argument(
+        "--winogrande-config",
+        default="winogrande_xl",
+        help="HF config for allenai/winogrande",
+    )
     parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--learning-rate", type=float, default=2e-5)
     parser.add_argument(
@@ -74,12 +74,33 @@ def main() -> None:
     )
     parser.add_argument("--no-fp16", action="store_true", help="Disable mixed precision")
     parser.add_argument("--checkpoint-dir", type=Path, default=None)
+    parser.add_argument(
+        "--summary-out",
+        type=Path,
+        default=None,
+        help="Write training summary JSON to this path",
+    )
+    parser.add_argument(
+        "--metrics-out",
+        type=Path,
+        default=None,
+        help="Append per-epoch metrics JSONL (for orchestrator progress polling)",
+    )
+    parser.add_argument("--subset-name", default=None, help="Subset label for W&B config")
+    parser.add_argument("--subset-strategy", default=None, help="Selection strategy for W&B config")
+    parser.add_argument(
+        "--figures-dir",
+        type=Path,
+        default=None,
+        help="Save per-epoch and final data maps + training curve here",
+    )
     add_wandb_args(parser)
     args = parser.parse_args()
     load_hf_credentials()
 
     model_name = args.model_name or MODEL_PRESETS[args.preset]
     max_train = None if args.max_train_samples == 0 else args.max_train_samples
+    max_eval = None if args.max_eval_samples == 0 else args.max_eval_samples
 
     output = args.output
     if output is None:
@@ -93,15 +114,18 @@ def main() -> None:
         dataset=args.dataset,
         model_name=model_name,
         max_train_samples=max_train,
-        max_eval_samples=args.max_eval_samples,
+        max_eval_samples=max_eval,
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         max_length=args.max_length,
+        seed=args.seed,
         fp16=not args.no_fp16,
         output_logs=output,
         checkpoint_dir=args.checkpoint_dir,
         subset_guids=subset_guids,
+        winogrande_config=args.winogrande_config,
+        snapshot_dir=args.figures_dir,
     )
     cfg = apply_preset_defaults(cfg, args.preset)
     if args.no_4bit:
@@ -130,21 +154,63 @@ def main() -> None:
         job_type="train_collect_dynamics",
         config={
             "model": cfg.model_name,
+            "dataset": cfg.dataset,
             "epochs": cfg.epochs,
             "max_train_samples": cfg.max_train_samples,
             "subset_file": str(args.subset_file) if args.subset_file else None,
+            "subset_name": args.subset_name,
+            "subset_strategy": args.subset_strategy,
+            "seed": cfg.seed,
         },
     )
 
     print(f"model: {cfg.model_name}")
     print(f"device: will use cuda if available")
-    summary = train_and_collect_dynamics(cfg)
+    wandb_run = None
+    if use_wandb(args):
+        import wandb
+
+        wandb_run = wandb.run
+    summary = train_and_collect_dynamics(
+        cfg,
+        wandb_run=wandb_run,
+        metrics_log=args.metrics_out,
+    )
 
     if use_wandb(args):
         import wandb
 
-        wandb.log(summary)
+        wandb.log({"final_val_accuracy": summary.get("final_val_accuracy"), **summary})
         wandb.save(str(cfg.output_logs))
+        if args.metrics_out and args.metrics_out.is_file():
+            wandb.save(str(args.metrics_out))
+
+    if args.summary_out:
+        args.summary_out.parent.mkdir(parents=True, exist_ok=True)
+        with args.summary_out.open("w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+
+    if args.figures_dir and cfg.output_logs.is_file():
+        from scripts.run_cartography_experiment import (
+            _build_figures,
+            _collect_dynamics_from_logs,
+        )
+
+        args.figures_dir.mkdir(parents=True, exist_ok=True)
+        coords = _collect_dynamics_from_logs(cfg.output_logs)
+        exp = SimpleNamespace(
+            figures_dir=args.figures_dir,
+            regions_path=lambda: args.figures_dir / "cartography_with_regions.jsonl",
+        )
+        _build_figures(exp, coords, task="snli", dataset=args.dataset)
+        if args.metrics_out and args.metrics_out.is_file():
+            subset_label = args.subset_name or args.subset_strategy or args.dataset
+            save_training_curve_plot(
+                args.metrics_out,
+                args.figures_dir / "training_curve.png",
+                title=f"{subset_label} — training curve",
+            )
+        print(f"figures saved under {args.figures_dir}")
 
     print(json.dumps(summary, indent=2))
     print(f"\nnext: python scripts/01_collect_dynamics.py --input {cfg.output_logs}")
