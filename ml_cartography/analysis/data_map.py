@@ -288,7 +288,15 @@ REGION_COLORS = {
 }
 
 PAPER_CORRECTNESS_MARKERS = ["o", "X", "s", "P", "D", "^", "v"]
-PAPER_CORRECTNESS_CMAP = plt.cm.get_cmap("coolwarm")
+PAPER_CORRECTNESS_COLORS = {
+    0.0: "#4f6fe8",
+    0.2: "#5671c8",
+    0.3: "#33436f",
+    0.5: "#2f2f2f",
+    0.7: "#6b4138",
+    0.8: "#9c4a3b",
+    1.0: "#ef4b3f",
+}
 PAPER_HIST_COLORS = {
     "confidence": "#6a3d9a",
     "variability": "#0f8b8d",
@@ -460,23 +468,24 @@ def _paper_style_correctness_plot(
     x: np.ndarray,
     y: np.ndarray,
     rows: List[Dict],
-) -> None:
+) -> tuple[list[object], list[str]]:
     correctness = np.array([float(r.get("correctness", 0.0)) for r in rows], dtype=float)
     buckets = np.array([round(v, 1) for v in correctness], dtype=float)
     unique_buckets = sorted(set(buckets.tolist()))
-    color_positions = np.linspace(0.05, 0.95, max(len(unique_buckets), 2))
+    handles: list[object] = []
+    labels: list[str] = []
     marker_map = {
         bucket: PAPER_CORRECTNESS_MARKERS[i % len(PAPER_CORRECTNESS_MARKERS)]
         for i, bucket in enumerate(unique_buckets)
     }
     color_map = {
-        bucket: PAPER_CORRECTNESS_CMAP(color_positions[i])
-        for i, bucket in enumerate(unique_buckets)
+        bucket: PAPER_CORRECTNESS_COLORS.get(bucket, "#777777")
+        for bucket in unique_buckets
     }
 
     for bucket in unique_buckets:
         mask = buckets == bucket
-        ax.scatter(
+        handle = ax.scatter(
             x[mask],
             y[mask],
             c=[color_map[bucket]],
@@ -484,9 +493,10 @@ def _paper_style_correctness_plot(
             marker=marker_map[bucket],
             alpha=0.75,
             linewidths=0.2,
-            label=f"{bucket:.1f}",
             rasterized=True,
         )
+        handles.append(handle)
+        labels.append(f"{bucket:.1f}")
 
     ax.annotate(
         "easy-to-learn",
@@ -512,7 +522,7 @@ def _paper_style_correctness_plot(
     ax.set_ylim(-0.02, 1.02)
     ax.set_xlabel("variability")
     ax.set_ylabel("confidence")
-    ax.legend(title="correct.", loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=9, title_fontsize=9)
+    return handles, labels
 
 
 def _paper_style_histograms(
@@ -520,9 +530,9 @@ def _paper_style_histograms(
     rows: List[Dict],
 ) -> None:
     panels = [
-        ("confidence", np.array([float(r["confidence"]) for r in rows], dtype=float), np.linspace(0.0, 1.0, 9)),
-        ("variability", np.array([float(r["variability"]) for r in rows], dtype=float), np.linspace(0.0, 0.5, 9)),
-        ("correctness", np.array([float(r["correctness"]) for r in rows], dtype=float), np.array([0.0, 0.2, 0.3, 0.5, 0.7, 0.8, 1.0])),
+        ("confidence", np.array([float(r["confidence"]) for r in rows], dtype=float), np.array([0.0, 0.5, 1.0])),
+        ("variability", np.array([float(r["variability"]) for r in rows], dtype=float), np.array([0.0, 0.2, 0.4])),
+        ("correctness", np.array([float(r["correctness"]) for r in rows], dtype=float), np.array([0.0, 0.5, 1.0])),
     ]
     for ax, (label, values, ticks) in zip(axes, panels):
         color = PAPER_HIST_COLORS[label]
@@ -562,7 +572,7 @@ def save_data_map_plot(
 
     if color_by == "correctness":
         fig = plt.figure(figsize=(13.5, 8.8))
-        gs = fig.add_gridspec(3, 2, width_ratios=[5.4, 1.1], hspace=0.38, wspace=0.22)
+        gs = fig.add_gridspec(3, 2, width_ratios=[5.3, 1.1], hspace=0.38, wspace=0.22)
         ax = fig.add_subplot(gs[:, 0])
         hist_axes = [
             fig.add_subplot(gs[0, 1]),
@@ -574,7 +584,18 @@ def save_data_map_plot(
         hist_axes = []
 
     if color_by == "correctness":
-        _paper_style_correctness_plot(ax, x, y, rows)
+        handles, labels = _paper_style_correctness_plot(ax, x, y, rows)
+        ax.legend(
+            handles,
+            labels,
+            title="correct.",
+            loc="upper right",
+            fontsize=9,
+            title_fontsize=9,
+            frameon=True,
+            borderpad=0.6,
+            handletextpad=0.5,
+        )
         _paper_style_histograms(hist_axes, rows)
     else:
         regions = np.array([r.get("region", "mixed") for r in rows])
