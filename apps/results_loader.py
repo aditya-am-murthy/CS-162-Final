@@ -64,12 +64,78 @@ def load_summary(run_dir: Path) -> dict[str, Any] | None:
 
 
 def list_figure_paths(run_dir: Path) -> list[Path]:
+    return list_files(run_dir, "figures", "*.png")
+
+
+def list_files(
+    run_dir: Path,
+    relative_dir: str,
+    pattern: str,
+    *,
+    recursive: bool = False,
+) -> list[Path]:
     if not run_dir.is_dir():
         return []
-    fig_dir = run_dir / "figures"
-    if not fig_dir.is_dir():
+    base_dir = run_dir / relative_dir
+    if not base_dir.is_dir():
         return []
-    return sorted(fig_dir.glob("*.png"))
+    if recursive:
+        return sorted(base_dir.rglob(pattern))
+    return sorted(base_dir.glob(pattern))
+
+
+def list_dynamics_files(run_dir: Path) -> list[Path]:
+    return list_files(run_dir, "dynamics", "*.jsonl")
+
+
+def list_snapshot_files(run_dir: Path) -> list[Path]:
+    return list_files(run_dir, "dynamics/snapshots", "*", recursive=False)
+
+
+def list_snapshot_images(run_dir: Path) -> list[Path]:
+    return list_files(run_dir, "dynamics/snapshots", "*.png")
+
+
+def list_snapshot_jsonl(run_dir: Path) -> list[Path]:
+    return list_files(run_dir, "dynamics/snapshots", "*.jsonl")
+
+
+def list_fixed_map_modes(run_dir: Path) -> list[str]:
+    if not run_dir.is_dir():
+        return []
+    fixed_maps_dir = run_dir / "fixed-maps"
+    if not fixed_maps_dir.is_dir():
+        return []
+    return sorted(path.name for path in fixed_maps_dir.iterdir() if path.is_dir())
+
+
+def list_fixed_map_images(run_dir: Path, mode: str) -> list[Path]:
+    return list_files(run_dir, f"fixed-maps/{mode}", "*.png")
+
+
+def list_fixed_map_json(run_dir: Path, mode: str) -> list[Path]:
+    return sorted(
+        list_files(run_dir, f"fixed-maps/{mode}", "*.json")
+        + list_files(run_dir, f"fixed-maps/{mode}", "*.jsonl")
+    )
+
+
+def list_model_files(run_dir: Path) -> list[Path]:
+    return list_files(run_dir, "models/final", "*")
+
+
+def list_log_files(run_dir: Path) -> list[Path]:
+    return list_files(run_dir, "logs", "*")
+
+
+def load_region_counts(run_dir: Path) -> dict[str, Any] | None:
+    if not run_dir.is_dir():
+        return None
+    return _load_json(run_dir / "figures" / "region_counts.json")
+
+
+def load_json_from_path(path: Path) -> dict[str, Any] | None:
+    return _load_json(path)
 
 
 def has_region_rows(run_dir: Path) -> bool:
@@ -99,6 +165,26 @@ def preview_region_rows(
             if len(rows) >= limit:
                 break
     return rows
+
+
+def preview_jsonl_path(path: Path, limit: int = 50) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            rows.append(json.loads(line))
+            if len(rows) >= limit:
+                break
+    return rows
+
+
+def load_training_metrics(run_dir: Path, limit: int = 200) -> list[dict[str, Any]]:
+    metrics_path = run_dir / "logs" / "training_metrics.jsonl"
+    return preview_jsonl_path(metrics_path, limit=limit)
 
 
 def summarize_report_rows(payload: dict[str, Any] | None) -> dict[str, Any]:
