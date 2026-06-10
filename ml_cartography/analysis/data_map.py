@@ -287,6 +287,22 @@ REGION_COLORS = {
     "incorrect": "#f44336",
 }
 
+PAPER_CORRECTNESS_MARKERS = ["o", "X", "s", "P", "D", "^", "v"]
+PAPER_CORRECTNESS_COLORS = {
+    0.0: "#4f6fe8",
+    0.2: "#5671c8",
+    0.3: "#33436f",
+    0.5: "#2f2f2f",
+    0.7: "#6b4138",
+    0.8: "#9c4a3b",
+    1.0: "#ef4b3f",
+}
+PAPER_HIST_COLORS = {
+    "confidence": "#6a3d9a",
+    "variability": "#0f8b8d",
+    "correctness": "#9bc59d",
+}
+
 
 def _inverse_density_weight(
     counts: np.ndarray,
@@ -447,6 +463,93 @@ def _scatter_with_alphas(
         )
 
 
+def _paper_style_correctness_plot(
+    ax: plt.Axes,
+    x: np.ndarray,
+    y: np.ndarray,
+    rows: List[Dict],
+) -> tuple[list[object], list[str]]:
+    correctness = np.array([float(r.get("correctness", 0.0)) for r in rows], dtype=float)
+    buckets = np.array([round(v, 1) for v in correctness], dtype=float)
+    unique_buckets = sorted(set(buckets.tolist()))
+    handles: list[object] = []
+    labels: list[str] = []
+    marker_map = {
+        bucket: PAPER_CORRECTNESS_MARKERS[i % len(PAPER_CORRECTNESS_MARKERS)]
+        for i, bucket in enumerate(unique_buckets)
+    }
+    color_map = {
+        bucket: PAPER_CORRECTNESS_COLORS.get(bucket, "#777777")
+        for bucket in unique_buckets
+    }
+
+    for bucket in unique_buckets:
+        mask = buckets == bucket
+        handle = ax.scatter(
+            x[mask],
+            y[mask],
+            c=[color_map[bucket]],
+            s=14,
+            marker=marker_map[bucket],
+            alpha=0.75,
+            linewidths=0.2,
+            rasterized=True,
+        )
+        handles.append(handle)
+        labels.append(f"{bucket:.1f}")
+
+    ax.annotate(
+        "easy-to-learn",
+        xy=(0.06, 0.87),
+        fontsize=10,
+        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="#c44e52", alpha=0.9),
+    )
+    ax.annotate(
+        "hard-to-learn",
+        xy=(0.10, 0.22),
+        fontsize=10,
+        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="#4c72b0", alpha=0.9),
+    )
+    ax.annotate(
+        "ambiguous",
+        xy=(0.39, 0.50),
+        rotation=-12,
+        fontsize=10,
+        bbox=dict(boxstyle="round,pad=0.2", fc="#f2f2f2", ec="#555555", alpha=0.92),
+    )
+
+    ax.set_xlim(-0.01, max(0.5, float(x.max()) + 0.02 if x.size else 0.5))
+    ax.set_ylim(-0.02, 1.02)
+    ax.set_xlabel("variability")
+    ax.set_ylabel("confidence")
+    return handles, labels
+
+
+def _paper_style_histograms(
+    axes: List[plt.Axes],
+    rows: List[Dict],
+) -> None:
+    panels = [
+        ("confidence", np.array([float(r["confidence"]) for r in rows], dtype=float), np.array([0.0, 0.5, 1.0])),
+        ("variability", np.array([float(r["variability"]) for r in rows], dtype=float), np.array([0.0, 0.2, 0.4])),
+        ("correctness", np.array([float(r["correctness"]) for r in rows], dtype=float), np.array([0.0, 0.5, 1.0])),
+    ]
+    for ax, (label, values, ticks) in zip(axes, panels):
+        color = PAPER_HIST_COLORS[label]
+        ax.hist(values, bins=8, color=color, alpha=0.95, edgecolor="white", linewidth=0.8)
+        ax.set_ylabel("density")
+        ax.set_xlabel(label)
+        ax.grid(alpha=0.2)
+        ax.set_xticks(ticks)
+        if label == "confidence":
+            ax.set_xlim(-0.02, 1.02)
+        elif label == "correctness":
+            ax.set_xlim(-0.02, 1.02)
+        else:
+            right = max(0.5, float(values.max()) + 0.02 if len(values) else 0.5)
+            ax.set_xlim(-0.02, right)
+
+
 def save_data_map_plot(
     rows: List[Dict],
     output_path: Path,
@@ -467,41 +570,33 @@ def save_data_map_plot(
     use_density = opacity_mode == "density"
     flat_alpha = 0.85 if use_density else None
 
-    fig, ax = plt.subplots(figsize=(8, 6))
     if color_by == "correctness":
-        correct = np.array([float(r.get("correctness", 0.0)) >= 0.67 for r in rows])
-        if use_density:
-            alphas = compute_density_alphas(
-                x,
-                y,
-                groups=np.where(correct, "correct", "incorrect"),
-                penalty=density_penalty,
-            )
-            colors = ["#4caf50" if c else "#f44336" for c in correct]
-            markers = ["o" if c else "x" for c in correct]
-            sizes = np.where(correct, 16.0, 32.0)
-            _scatter_with_alphas(x, y, colors, alphas, sizes=sizes, markers=markers)
-        else:
-            if correct.any():
-                ax.scatter(
-                    x[correct],
-                    y[correct],
-                    c="#4caf50",
-                    alpha=0.45,
-                    s=18,
-                    label="mostly correct",
-                )
-            if (~correct).any():
-                ax.scatter(
-                    x[~correct],
-                    y[~correct],
-                    c="#f44336",
-                    alpha=0.5,
-                    s=22,
-                    marker="x",
-                    label="often incorrect",
-                )
-            ax.legend(loc="upper left", fontsize=9)
+        fig = plt.figure(figsize=(13.5, 8.8))
+        gs = fig.add_gridspec(3, 2, width_ratios=[5.3, 1.1], hspace=0.38, wspace=0.22)
+        ax = fig.add_subplot(gs[:, 0])
+        hist_axes = [
+            fig.add_subplot(gs[0, 1]),
+            fig.add_subplot(gs[1, 1]),
+            fig.add_subplot(gs[2, 1]),
+        ]
+    else:
+        fig, ax = plt.subplots(figsize=(8, 6))
+        hist_axes = []
+
+    if color_by == "correctness":
+        handles, labels = _paper_style_correctness_plot(ax, x, y, rows)
+        ax.legend(
+            handles,
+            labels,
+            title="correct.",
+            loc="upper right",
+            fontsize=9,
+            title_fontsize=9,
+            frameon=True,
+            borderpad=0.6,
+            handletextpad=0.5,
+        )
+        _paper_style_histograms(hist_axes, rows)
     else:
         regions = np.array([r.get("region", "mixed") for r in rows])
         colors = [REGION_COLORS.get(r, "#9e9e9e") for r in regions]
@@ -513,36 +608,37 @@ def save_data_map_plot(
         else:
             ax.scatter(x, y, c=colors, alpha=flat_alpha or 0.7, s=22)
 
-    ax.axvline(
-        limits["low_variability_max"],
-        color="#616161",
-        linestyle="--",
-        linewidth=1,
-        alpha=0.7,
-    )
-    ax.axvline(
-        limits["ambiguous_variability_min"],
-        color="#1565c0",
-        linestyle=":",
-        linewidth=1,
-        alpha=0.8,
-    )
-    ax.axhline(
-        limits["easy_confidence_min"],
-        color="#2e7d32",
-        linestyle="--",
-        linewidth=1,
-        alpha=0.7,
-    )
-    ax.axhline(
-        limits["hard_confidence_max"],
-        color="#c62828",
-        linestyle="--",
-        linewidth=1,
-        alpha=0.7,
-    )
-    ax.set_xlabel("Variability (std of gold-label probability)")
-    ax.set_ylabel("Confidence (mean gold-label probability)")
+    if color_by != "correctness":
+        ax.axvline(
+            limits["low_variability_max"],
+            color="#616161",
+            linestyle="--",
+            linewidth=1,
+            alpha=0.7,
+        )
+        ax.axvline(
+            limits["ambiguous_variability_min"],
+            color="#1565c0",
+            linestyle=":",
+            linewidth=1,
+            alpha=0.8,
+        )
+        ax.axhline(
+            limits["easy_confidence_min"],
+            color="#2e7d32",
+            linestyle="--",
+            linewidth=1,
+            alpha=0.7,
+        )
+        ax.axhline(
+            limits["hard_confidence_max"],
+            color="#c62828",
+            linestyle="--",
+            linewidth=1,
+            alpha=0.7,
+        )
+        ax.set_xlabel("Variability (std of gold-label probability)")
+        ax.set_ylabel("Confidence (mean gold-label probability)")
     ax.set_title(title)
     ax.grid(alpha=0.2)
 
