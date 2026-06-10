@@ -26,3 +26,7 @@ wandb/
 experiments/runs/*
 !experiments/runs/.gitkeep
 results/report.md
+
+# DS Store
+.DS_Store
+**/.DS_Store
