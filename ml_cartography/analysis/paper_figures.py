@@ -65,7 +65,7 @@ def _style_axes(ax: plt.Axes) -> None:
         spine.set_linewidth(0.8)
 
 
-def _save(fig: plt.Figure, path: Path, dpi: int = 200) -> None:
+def _save(fig: plt.Figure, path: Path, dpi: int = 140) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
     plt.close(fig)
@@ -384,12 +384,12 @@ def plot_fig5_agreement_heatmap(rows: List[Dict], output_path: Path) -> None:
         ]
     )
 
-    var_max = max(0.60, float(np.quantile(var, 0.995)) + 0.02)
-    # Square cells: bin width in data space must match bin height (paper Fig 5).
-    n_var_bins = 30
-    n_conf_bins = max(n_var_bins, int(round(n_var_bins * (1.0 / var_max))))
-    var_bins = np.linspace(0, var_max, n_var_bins + 1)
-    conf_bins = np.linspace(0, 1.0, n_conf_bins + 1)
+    # Square grid: paper shows variability ≤ 0.6 and confidence 0–1 with square cells.
+    n_bins = 30
+    var_max = 0.6
+    conf_max = 1.0
+    var_bins = np.linspace(0, var_max, n_bins + 1)
+    conf_bins = np.linspace(0, conf_max, n_bins + 1)
     sum_agree, _, _ = np.histogram2d(var, conf, bins=[var_bins, conf_bins], weights=agree)
     counts, _, _ = np.histogram2d(var, conf, bins=[var_bins, conf_bins])
     mean_agree = np.divide(
@@ -399,13 +399,16 @@ def plot_fig5_agreement_heatmap(rows: List[Dict], output_path: Path) -> None:
         where=counts > 0,
     )
 
-    plot_h = 7.0
-    plot_w = plot_h * (var_max / 1.0) + 1.4  # data aspect + colorbar
-    fig, ax = plt.subplots(figsize=(plot_w, plot_h), layout="constrained")
-    ax.set_facecolor(AGREEMENT_HEATMAP_BG)
-
     cmap = LinearSegmentedColormap.from_list("paper_agreement", AGREEMENT_CMAP_COLORS)
     cmap.set_bad(AGREEMENT_HEATMAP_BG)
+
+    fig = plt.figure(figsize=(5.2, 5.2), facecolor="white")
+    plot_frac = 0.62
+    left = 0.11
+    bottom = 0.11
+    ax = fig.add_axes([left, bottom, plot_frac, plot_frac])
+    cax = fig.add_axes([left + plot_frac + 0.05, bottom, 0.035, plot_frac])
+    ax.set_facecolor(AGREEMENT_HEATMAP_BG)
 
     mesh = ax.pcolormesh(
         var_bins,
@@ -415,19 +418,19 @@ def plot_fig5_agreement_heatmap(rows: List[Dict], output_path: Path) -> None:
         vmin=0.3,
         vmax=1.0,
         edgecolors="white",
-        linewidth=0.55,
+        linewidth=0.4,
         shading="flat",
     )
 
     ax.set_xlim(0, var_max)
-    ax.set_ylim(0, 1.0)
+    ax.set_ylim(0, conf_max)
     ax.set_xlabel("variability")
     ax.set_ylabel("confidence")
-    ax.set_xticks([0.10, 0.26, 0.43, min(0.60, round(var_max, 2))])
+    ax.set_xticks([0.10, 0.26, 0.43, 0.60])
     ax.set_yticks([0.13, 0.38, 0.63, 0.87])
-    ax.set_aspect("equal")
+    ax.set_aspect("auto")
 
-    cbar = fig.colorbar(mesh, ax=ax, shrink=0.92)
+    cbar = fig.colorbar(mesh, cax=cax)
     cbar.set_label("human agreement")
     cbar.set_ticks(np.arange(0.3, 1.01, 0.1))
 
@@ -435,7 +438,9 @@ def plot_fig5_agreement_heatmap(rows: List[Dict], output_path: Path) -> None:
         spine.set_linewidth(0.8)
         spine.set_color("#cccccc")
 
-    _save(fig, output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=140, facecolor="white", pad_inches=0.05)
+    plt.close(fig)
 
 
 def plot_fig7_dropout_regression(rows: List[Dict], output_path: Path) -> None:

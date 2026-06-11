@@ -96,8 +96,8 @@ def render_selection_table_image(
 
     cell_text = [[label, _plain(id_v), _plain(ood_v)] for label, id_v, ood_v in rows]
     n_rows = len(cell_text)
-    fig_h = max(3.5, 0.45 * n_rows + 1.6)
-    fig, ax = plt.subplots(figsize=(8.5, fig_h))
+    fig_h = max(2.8, 0.38 * n_rows + 1.2)
+    fig, ax = plt.subplots(figsize=(6.5, fig_h))
     ax.axis("off")
     table = ax.table(
         cellText=cell_text,
@@ -218,7 +218,7 @@ def plot_fig3_from_easy_role(
     rand_points.sort(key=lambda x: x[0], reverse=True)
     repl_points.sort(key=lambda x: x[0])
 
-    fig, axes = plt.subplots(1, 3, figsize=(14.5, 4.5))
+    fig, axes = plt.subplots(1, 3, figsize=(10.5, 3.2))
 
     ax = axes[0]
     _style_axes(ax)

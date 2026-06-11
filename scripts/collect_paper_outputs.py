@@ -46,6 +46,24 @@ def _copy(src: Path | None, dest_name: str, manifest: dict, note: str = "") -> N
     manifest[dest_name] = {"status": "ok", "source": str(src.relative_to(REPO)), "note": note}
 
 
+def _shrink_png(path: Path, max_width: int = 640) -> None:
+    """Keep paper_outputs web-friendly; Fig 5 is cropped to a square."""
+    from PIL import Image
+
+    img = Image.open(path).convert("RGB")
+    w, h = img.size
+    if "Figure_05" in path.name:
+        side = min(w, h)
+        left = (w - side) // 2
+        top = (h - side) // 2
+        img = img.crop((left, top, left + side, top + side))
+        w = h = side
+    if w > max_width:
+        nh = max(1, int(h * max_width / w))
+        img = img.resize((max_width, nh), Image.Resampling.LANCZOS)
+    img.save(path, optimize=True)
+
+
 def _export_table_csv(metrics_path: Path, output_csv: Path) -> bool:
     if not metrics_path.is_file():
         return False
@@ -224,6 +242,9 @@ def main() -> int:
     if qnli_run:
         q = _latest_glob(qnli_run / "fixed-maps/adaptive", "*_data_map_correctness.png")
         _copy(q, "Appendix_Figure_qnli_data_map.png", manifest, "Subsampled QNLI map")
+
+    for png in OUT.glob("*.png"):
+        _shrink_png(png)
 
     MANIFEST_PATH.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
