@@ -43,6 +43,7 @@ class TrainConfig:
     output_logs: Path = Path("data/raw/epoch_predictions_trained.jsonl")
     checkpoint_dir: Optional[Path] = None
     subset_guids: Optional[Set[str]] = None
+    label_overrides: Optional[Dict[str, int]] = None
     # dynamic maps (Idea #2)
     dynamic_snapshots: bool = True
     snapshot_dir: Optional[Path] = None
@@ -146,6 +147,7 @@ def _load_snli_rows(
     max_samples: Optional[int],
     subset_guids: Optional[Set[str]],
     seed: int,
+    label_overrides: Optional[Dict[str, int]] = None,
 ) -> List[Dict]:
     from datasets import load_dataset
 
@@ -157,12 +159,13 @@ def _load_snli_rows(
         guid = f"snli-{split}-{i:07d}"
         if subset_guids is not None and guid not in subset_guids:
             continue
+        label = int(label_overrides.get(guid, ex["label"])) if label_overrides else int(ex["label"])
         rows.append(
             {
                 "guid": guid,
                 "premise": ex["premise"],
                 "hypothesis": ex["hypothesis"],
-                "label": int(ex["label"]),
+                "label": label,
             }
         )
 
@@ -178,6 +181,7 @@ def _load_mnli_rows(
     max_samples: Optional[int],
     subset_guids: Optional[Set[str]],
     seed: int,
+    label_overrides: Optional[Dict[str, int]] = None,
 ) -> List[Dict]:
     """MultiNLI (Williams et al., 2018) — 3-way NLI, matched validation split."""
     from datasets import load_dataset
@@ -191,12 +195,13 @@ def _load_mnli_rows(
         guid = f"mnli-{hf_split}-{i:07d}"
         if subset_guids is not None and guid not in subset_guids:
             continue
+        label = int(label_overrides.get(guid, ex["label"])) if label_overrides else int(ex["label"])
         rows.append(
             {
                 "guid": guid,
                 "premise": ex["premise"],
                 "hypothesis": ex["hypothesis"],
-                "label": int(ex["label"]),
+                "label": label,
             }
         )
 
@@ -212,6 +217,7 @@ def _load_qnli_rows(
     max_samples: Optional[int],
     subset_guids: Optional[Set[str]],
     seed: int,
+    label_overrides: Optional[Dict[str, int]] = None,
 ) -> List[Dict]:
     """QNLI — binary entailment (question, passage sentence), from SQuAD-derived GLUE task."""
     from datasets import load_dataset
@@ -224,12 +230,13 @@ def _load_qnli_rows(
         guid = f"qnli-{hf_split}-{i:07d}"
         if subset_guids is not None and guid not in subset_guids:
             continue
+        label = int(label_overrides.get(guid, ex["label"])) if label_overrides else int(ex["label"])
         rows.append(
             {
                 "guid": guid,
                 "premise": ex["question"],
                 "hypothesis": ex["sentence"],
-                "label": int(ex["label"]),
+                "label": label,
             }
         )
 
@@ -256,6 +263,7 @@ def _load_winogrande_rows(
     subset_guids: Optional[Set[str]],
     seed: int,
     config_name: str = "winogrande_xl",
+    label_overrides: Optional[Dict[str, int]] = None,
 ) -> List[Dict]:
     """
     Raw WinoGrande items (one row per prompt).
@@ -272,13 +280,16 @@ def _load_winogrande_rows(
         guid = f"winogrande-{hf_split}-{i:07d}"
         if subset_guids is not None and guid not in subset_guids:
             continue
+        answer = str(ex["answer"]).strip()
+        if label_overrides and guid in label_overrides:
+            answer = str(int(label_overrides[guid]) + 1)
         rows.append(
             {
                 "guid": guid,
                 "sentence": ex["sentence"],
                 "option1": ex["option1"],
                 "option2": ex["option2"],
-                "answer": str(ex["answer"]).strip(),
+                "answer": answer,
             }
         )
 
@@ -337,17 +348,23 @@ def _load_dataset_rows(
     subset_guids: Optional[Set[str]],
     seed: int,
     winogrande_config: str = "winogrande_xl",
+    label_overrides: Optional[Dict[str, int]] = None,
 ) -> List[Dict]:
     d = dataset.lower()
     if d == "snli":
-        return _load_snli_rows(split, max_samples, subset_guids, seed)
+        return _load_snli_rows(split, max_samples, subset_guids, seed, label_overrides)
     if d == "mnli":
-        return _load_mnli_rows(split, max_samples, subset_guids, seed)
+        return _load_mnli_rows(split, max_samples, subset_guids, seed, label_overrides)
     if d == "qnli":
-        return _load_qnli_rows(split, max_samples, subset_guids, seed)
+        return _load_qnli_rows(split, max_samples, subset_guids, seed, label_overrides)
     if d == "winogrande":
         return _load_winogrande_rows(
-            split, max_samples, subset_guids, seed, config_name=winogrande_config
+            split,
+            max_samples,
+            subset_guids,
+            seed,
+            config_name=winogrande_config,
+            label_overrides=label_overrides,
         )
     raise ValueError(f"unsupported dataset: {dataset}")
 
@@ -779,6 +796,7 @@ def train_and_collect_dynamics(
         cfg.subset_guids,
         cfg.seed,
         winogrande_config=cfg.winogrande_config,
+        label_overrides=cfg.label_overrides,
     )
     val_raw = _load_dataset_rows(
         cfg.dataset,

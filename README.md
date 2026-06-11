@@ -68,6 +68,7 @@ The app will read the published experiment values from `results/<run_id>/`.
 | `scripts/06_ambiguous_ablation.py` | §4 | Ambiguous-only sweeps + easy replacement |
 | `scripts/07_generate_insight_figures.py` | §2–§6 | Paper-style figures → `results/` |
 | `scripts/08_role_easy_to_learn.py` | §4 | WinoGrande ambiguous-size sweep + random baselines + easy replacements |
+| `scripts/12_noise_detection_paper.py` | §5 | Label-noise injection + confidence-only noise detector |
 | `scripts/run_all_experiments.py` | all | Runs the full pipeline |
 
 Run everything (monitor on [wandb.ai](https://wandb.ai)):
@@ -89,6 +90,7 @@ python scripts/04_detect_mislabeled.py
 python scripts/05_uncertainty_checks.py
 python scripts/06_ambiguous_ablation.py
 python scripts/08_role_easy_to_learn.py --no-wandb
+python scripts/12_noise_detection_paper.py --no-wandb
 ```
 
 For the WinoGrande easy-to-learn experiment, the default command exports subset
