@@ -237,7 +237,13 @@ def _run_retraining(
     if args.no_4bit:
         cfg.load_in_4bit = False
 
-    summary = train_and_collect_dynamics(cfg, metrics_log=metrics_path)
+    wandb_run = None
+    if use_wandb(args):
+        import wandb
+
+        wandb_run = wandb.run
+
+    summary = train_and_collect_dynamics(cfg, metrics_log=metrics_path, wandb_run=wandb_run)
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     with summary_path.open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
