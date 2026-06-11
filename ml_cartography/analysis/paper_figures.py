@@ -402,12 +402,7 @@ def plot_fig5_agreement_heatmap(rows: List[Dict], output_path: Path) -> None:
     cmap = LinearSegmentedColormap.from_list("paper_agreement", AGREEMENT_CMAP_COLORS)
     cmap.set_bad(AGREEMENT_HEATMAP_BG)
 
-    fig = plt.figure(figsize=(5.2, 5.2), facecolor="white")
-    plot_frac = 0.62
-    left = 0.11
-    bottom = 0.11
-    ax = fig.add_axes([left, bottom, plot_frac, plot_frac])
-    cax = fig.add_axes([left + plot_frac + 0.05, bottom, 0.035, plot_frac])
+    fig, ax = plt.subplots(figsize=(5.4, 5.0), layout="constrained", facecolor="white")
     ax.set_facecolor(AGREEMENT_HEATMAP_BG)
 
     mesh = ax.pcolormesh(
@@ -429,8 +424,9 @@ def plot_fig5_agreement_heatmap(rows: List[Dict], output_path: Path) -> None:
     ax.set_xticks([0.10, 0.26, 0.43, 0.60])
     ax.set_yticks([0.13, 0.38, 0.63, 0.87])
     ax.set_aspect("auto")
+    ax.set_box_aspect(1)
 
-    cbar = fig.colorbar(mesh, cax=cax)
+    cbar = fig.colorbar(mesh, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_label("human agreement")
     cbar.set_ticks(np.arange(0.3, 1.01, 0.1))
 
@@ -439,7 +435,7 @@ def plot_fig5_agreement_heatmap(rows: List[Dict], output_path: Path) -> None:
         spine.set_color("#cccccc")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=140, facecolor="white", pad_inches=0.05)
+    fig.savefig(output_path, dpi=140, facecolor="white", bbox_inches="tight", pad_inches=0.12)
     plt.close(fig)
 
 

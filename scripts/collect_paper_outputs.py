@@ -47,17 +47,11 @@ def _copy(src: Path | None, dest_name: str, manifest: dict, note: str = "") -> N
 
 
 def _shrink_png(path: Path, max_width: int = 640) -> None:
-    """Keep paper_outputs web-friendly; Fig 5 is cropped to a square."""
+    """Keep paper_outputs web-friendly (resize only, no center-crop)."""
     from PIL import Image
 
     img = Image.open(path).convert("RGB")
     w, h = img.size
-    if "Figure_05" in path.name:
-        side = min(w, h)
-        left = (w - side) // 2
-        top = (h - side) // 2
-        img = img.crop((left, top, left + side, top + side))
-        w = h = side
     if w > max_width:
         nh = max(1, int(h * max_width / w))
         img = img.resize((max_width, nh), Image.Resampling.LANCZOS)
