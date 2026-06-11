@@ -32,6 +32,23 @@ from scripts.common import (
 )
 
 
+def _load_label_overrides(path: Path) -> dict[str, int]:
+    if path.suffix == ".jsonl":
+        overrides: dict[str, int] = {}
+        with path.open(encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                overrides[str(row["guid"])] = int(row.get("new_label", row["label"]))
+        return overrides
+    with path.open(encoding="utf-8") as f:
+        payload = json.load(f)
+    if isinstance(payload, dict) and "label_overrides" in payload:
+        payload = payload["label_overrides"]
+    return {str(k): int(v) for k, v in payload.items()}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=None)
@@ -72,6 +89,12 @@ def main() -> None:
         default=None,
         help="JSONL with guid field; train only on those examples",
     )
+    parser.add_argument(
+        "--label-overrides",
+        type=Path,
+        default=None,
+        help="JSON/JSONL mapping guid to replacement train label",
+    )
     parser.add_argument("--no-fp16", action="store_true", help="Disable mixed precision")
     parser.add_argument("--checkpoint-dir", type=Path, default=None)
     parser.add_argument(
@@ -109,6 +132,7 @@ def main() -> None:
     subset_guids = None
     if args.subset_file:
         subset_guids = load_guids_from_jsonl(args.subset_file)
+    label_overrides = _load_label_overrides(args.label_overrides) if args.label_overrides else None
 
     cfg = TrainConfig(
         dataset=args.dataset,
@@ -124,6 +148,7 @@ def main() -> None:
         output_logs=output,
         checkpoint_dir=args.checkpoint_dir,
         subset_guids=subset_guids,
+        label_overrides=label_overrides,
         winogrande_config=args.winogrande_config,
         snapshot_dir=args.figures_dir,
     )
@@ -158,6 +183,7 @@ def main() -> None:
             "epochs": cfg.epochs,
             "max_train_samples": cfg.max_train_samples,
             "subset_file": str(args.subset_file) if args.subset_file else None,
+            "label_overrides": str(args.label_overrides) if args.label_overrides else None,
             "subset_name": args.subset_name,
             "subset_strategy": args.subset_strategy,
             "seed": cfg.seed,
