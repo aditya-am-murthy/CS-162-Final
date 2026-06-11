@@ -686,6 +686,8 @@ def main() -> None:
 
     manifest = {
         "paper_task": "Fixed 33% Strategy Comparison (§3)",
+        "tag": _wandb_group(args),
+        "wandb_group": _wandb_group(args),
         "input": str(input_path),
         "output_dir": str(args.output_dir),
         "dataset": args.dataset,

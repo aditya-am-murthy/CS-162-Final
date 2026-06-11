@@ -542,8 +542,11 @@ def main() -> None:
         },
     )
 
+    wandb_group = getattr(args, "wandb_group", None) or args.wandb_run_name or "fig4-noise"
     manifest = {
         "paper_task": "Noise injection and automatic noise detection (§5)",
+        "tag": wandb_group,
+        "wandb_group": wandb_group,
         "input": str(input_path),
         "output_dir": str(args.output_dir),
         "dataset": args.dataset,
