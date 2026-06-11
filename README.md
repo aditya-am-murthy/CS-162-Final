@@ -43,6 +43,18 @@ conda activate cs162-cartography
 
 `requirements.txt` mirrors pip-only deps for non-conda installs.
 
+## Streamlit App
+
+First install the base dependencies, then launch the read-only results explorer:
+
+```bash
+conda activate cs162-cartography
+pip install -r requirements.txt
+streamlit run apps/streamlit_app.py
+```
+
+The app will read the published experiment values from `results/<run_id>/`.
+
 ## Experiment Scripts (maps to `docs/local-docs/experiments.md`)
 
 | Script | Paper section | What it does |
@@ -81,11 +93,37 @@ python scripts/08_role_easy_to_learn.py --no-wandb
 python scripts/12_noise_detection_paper.py --no-wandb
 ```
 
+<<<<<<< Updated upstream
 For the WinoGrande easy-to-learn experiment, the default command exports subset
 files plus `data/processed/easy_role/train_commands.sh`. Add `--train` to launch
 the retraining sweep from the same script.
 
 ## GPU training (real dynamics)
+=======
+## Full training suite (multi-model + Ideas #1/#2)
+
+```bash
+pip install -r requirements-train.txt
+python scripts/train_suite.py --all --dynamic   # 4 SNLI models + preference + instruction
+python scripts/train_suite.py --snli-encoders --only snli_distilbert
+```
+
+Artifacts: `experiments/runs/<timestamp>_<task>/` → published to `results/<timestamp>_<task>/`.  
+See `results/report.md` and `configs/train_suite.json`.
+
+| Job | Model |
+|-----|--------|
+| `snli_distilbert` | DistilBERT |
+| `snli_roberta_base` | RoBERTa-base |
+| `snli_llama_3_2_1b` | Llama-3.2-1B (LoRA) |
+| `snli_mistral_7b` | Mistral-7B (LoRA) |
+| `preference_ultrafeedback` | Preference data maps (Idea #1) |
+| `instruction_alpaca` | Instruction tuning maps (Idea #1) |
+
+`--dynamic` enables iterative snapshots + curriculum (Idea #2).
+
+## GPU training (single model)
+>>>>>>> Stashed changes
 
 ### Google Colab (T4)
 

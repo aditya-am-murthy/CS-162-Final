@@ -875,7 +875,8 @@ def train_and_collect_dynamics(
         total_optimizer_steps,
     )
 
-    for epoch in range(1, cfg.epochs + 1):
+    with tqdm(range(1, cfg.epochs + 1), desc="epochs", unit="epoch") as epoch_bar:
+      for epoch in epoch_bar:
         if is_winogrande:
             train_loader = _build_winogrande_pair_loader(train_ds, cfg, tokenizer, device)
         else:
@@ -979,6 +980,12 @@ def train_and_collect_dynamics(
         }
         if metrics_log:
             append_training_metric(metrics_log, metric_row)
+
+        epoch_bar.set_postfix(
+            loss=f"{train_loss:.4f}",
+            val_acc=f"{val_acc:.4f}",
+            refresh=False,
+        )
 
         epoch_figure_paths: List[Path] = []
         if snapshot_dir:
