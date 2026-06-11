@@ -9,7 +9,7 @@ conda activate cs162-cartography
 mkdir -p logs
 
 INPUT="${INPUT:-results/20260609_074628_snli_winogrande_roberta-large/dynamics/cartography_with_regions.jsonl}"
-GPUS_08="${GPUS_08:-1,2,3,4}"
+GPUS_08="${GPUS_08:-1,2}"
 GPU_12="${GPU_12:-0}"
 WANDB_GROUP="${WANDB_GROUP:-pranav-scripts}"
 SESSION="${TMUX_SESSION:-cs162-pranav}"
@@ -46,6 +46,7 @@ tmux new-window -t "$SESSION" -n script08 \
    echo; echo '=== script 08 finished ==='; bash"
 
 echo "Started tmux session: $SESSION"
+echo "  3 GPUs total: cuda:${GPU_12} (script 12) + gpus:${GPUS_08} (script 08)"
 echo "  window script12 -> cuda:${GPU_12}  (12_noise_detection_paper.py --train)"
 echo "  window script08 -> gpus:${GPUS_08} (08_role_easy_to_learn.py --train, epoch progress bar)"
 echo ""

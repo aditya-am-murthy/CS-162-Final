@@ -43,4 +43,4 @@ python scripts/08_role_easy_to_learn.py \
   --dataset winogrande \
   --preset roberta-base \
   --train \
-  --gpus 0,1,2,3,4
+  --gpus 1,2
