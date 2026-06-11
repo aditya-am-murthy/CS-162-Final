@@ -35,13 +35,26 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("results"),
+        default=None,
+        help="Default: results/<run_id>/figures or results/figures",
+    )
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Publish figures into results/<run_id>/figures/",
     )
     parser.add_argument("--num-examples", type=int, default=8000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--noise-ratio", type=float, default=0.01)
     add_wandb_args(parser)
     args = parser.parse_args()
+
+    if args.output_dir is None:
+        if args.run_id:
+            args.output_dir = Path("results") / args.run_id / "figures"
+        else:
+            args.output_dir = Path("results") / "figures"
 
     init_wandb(
         args,
