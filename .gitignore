@@ -1,20 +1,17 @@
 #Directories
 docs/local-docs/*
 data/*
-<<<<<<< Updated upstream
 results/*
 unsloth_compiled_cache/*
 unsloth_compiled_cache
 unsloth_compiled_cache/*.py
 logs/*
 logs/*.log
-=======
 experiments/runs/*
 !experiments/runs/.gitkeep
 results/*
 !results/report.md
 !results/experiment_index.json
->>>>>>> Stashed changes
 
 #caches
 **/__pycache__/*
@@ -34,6 +31,7 @@ wandb/
 experiments/runs/*
 !experiments/runs/.gitkeep
 results/report.md
+paper_outputs/manifest.json
 
 # DS Store
 .DS_Store
