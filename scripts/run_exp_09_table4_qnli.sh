@@ -6,6 +6,9 @@ set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/lib/experiment_env.sh"
 exp_activate_conda
 exp_apply_paper_defaults
+if [[ "${SUBSET_MODE:-0}" == "1" ]]; then
+  source "$(dirname "$0")/lib/subset_training.env"
+fi
 
 SESSION="${SESSION:-cs162-exp-table4}"
 QNLI_INPUT="${QNLI_INPUT:-results/20260527_051157_snli_qnli_roberta-base/dynamics/cartography_with_regions.jsonl}"

@@ -12,8 +12,8 @@ exp_repo_root() {
     printf '%s\n' "$EXP_ROOT"
     return
   fi
-  local src="${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}"
-  EXP_ROOT="$(cd "$(dirname "$src")/../.." && pwd)"
+  # Always anchor to this library file: scripts/lib -> repo root.
+  EXP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
   printf '%s\n' "$EXP_ROOT"
 }
 

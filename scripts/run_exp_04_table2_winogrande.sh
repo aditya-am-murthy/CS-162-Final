@@ -6,7 +6,21 @@ set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/lib/experiment_env.sh"
 exp_activate_conda
 exp_apply_paper_defaults
+[[ -f "$(dirname "$0")/lib/fast_5hour.env" ]] && source "$(dirname "$0")/lib/fast_5hour.env"
 exp_require_input
+
+if [[ "${SKIP_TRAIN_TABLE2:-0}" == "1" ]]; then
+  echo "SKIP_TRAIN_TABLE2=1 — using existing results in ${TABLE2_OUTPUT:-data/processed/region_finetune_winogrande}"
+  ROOT="$(exp_repo_root)"
+  OUT="${TABLE2_OUTPUT:-data/processed/region_finetune_winogrande}"
+  "$PYTHON" "$ROOT/scripts/11_region_metrics.py" \
+    --results "$OUT/train_results.json" --manifest "$OUT/manifest.json" \
+    --output "$ROOT/results/region_metrics_table2.json" --no-wandb
+  bash "$ROOT/scripts/export_all_metrics.sh" "${WANDB_GROUP:-deadline-5h}"
+  "$PYTHON" "$ROOT/scripts/plot_from_metrics_csv.py" --experiment-tag table2 --no-wandb
+  echo "=== Table 2 complete (existing runs) ==="
+  exit 0
+fi
 
 SESSION="${SESSION:-cs162-exp-table2}"
 OUTPUT_DIR="${OUTPUT_DIR:-data/processed/region_finetune_winogrande}"

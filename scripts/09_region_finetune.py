@@ -192,6 +192,7 @@ def _train_command(
     batch_size: int | None,
     learning_rate: float,
     max_length: int,
+    max_train_samples: int,
     max_eval_samples: int,
     winogrande_config: str,
     seed: int,
@@ -213,7 +214,7 @@ def _train_command(
         "--epochs", str(epochs),
         "--learning-rate", str(learning_rate),
         "--max-length", str(max_length),
-        "--max-train-samples", "0",
+        "--max-train-samples", str(max_train_samples),
         "--max-eval-samples", str(max_eval_samples),
         "--subset-file", str(subset_path),
         "--output", str(output_log),
@@ -344,6 +345,7 @@ def _training_jobs(
                 batch_size=args.batch_size,
                 learning_rate=args.learning_rate,
                 max_length=args.max_length,
+                max_train_samples=args.max_train_samples,
                 max_eval_samples=args.max_eval_samples,
                 winogrande_config=args.winogrande_config,
                 seed=run_seed,
@@ -565,6 +567,12 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--max-length", type=int, default=256)
+    parser.add_argument(
+        "--max-train-samples",
+        type=int,
+        default=0,
+        help="Cap training examples per subset (0 = use all rows in subset file).",
+    )
     parser.add_argument("--max-eval-samples", type=int, default=0)
     parser.add_argument("--winogrande-config", default="winogrande_xl")
     parser.add_argument(
@@ -669,6 +677,7 @@ def main() -> None:
                 batch_size=args.batch_size,
                 learning_rate=args.learning_rate,
                 max_length=args.max_length,
+                max_train_samples=args.max_train_samples,
                 max_eval_samples=args.max_eval_samples,
                 winogrande_config=args.winogrande_config,
                 seed=args.seed,

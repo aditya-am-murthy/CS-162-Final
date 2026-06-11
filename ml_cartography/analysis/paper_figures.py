@@ -19,6 +19,20 @@ COLOR_HARD = "#EDC948"
 COLOR_AMBIG = "#AF7AA1"
 BG = "#FAFAFA"
 
+# Fig 5 human-agreement heatmap (matches paper correlating-human-performance.pdf)
+AGREEMENT_HEATMAP_BG = "#eef1f6"
+AGREEMENT_CMAP_COLORS = [
+    "#2b1058",
+    "#3b4a8a",
+    "#2a6f8f",
+    "#1f8f7a",
+    "#39a757",
+    "#6bc96b",
+    "#a8d96a",
+    "#d9ef8b",
+    "#ffffd4",
+]
+
 # Table 2 WinoGrande (paper reported means, ×100 for %)
 WINOGRANDE_SELECTION = [
     ("100% train", 79.7, 86.0),
@@ -343,8 +357,24 @@ def _human_agreement_proxy(confidence: float, variability: float) -> float:
     return max(0.0, min(1.0, 0.08 + 0.88 * confidence - 0.15 * variability))
 
 
+def _paper_heatmap_style() -> None:
+    """Match EMNLP 2020 Fig 5 typography (Georgia serif, paper context)."""
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.serif": ["Georgia", "DejaVu Serif", "Times New Roman"],
+            "font.size": 11,
+            "axes.labelsize": 12,
+            "xtick.labelsize": 10,
+            "ytick.labelsize": 10,
+        }
+    )
+
+
 def plot_fig5_agreement_heatmap(rows: List[Dict], output_path: Path) -> None:
     """Fig 5: binned heatmap of mean human agreement on the data map."""
+    _paper_heatmap_style()
+
     conf = np.array([float(r["confidence"]) for r in rows])
     var = np.array([float(r["variability"]) for r in rows])
     agree = np.array(
@@ -354,8 +384,12 @@ def plot_fig5_agreement_heatmap(rows: List[Dict], output_path: Path) -> None:
         ]
     )
 
-    var_bins = np.linspace(0, 0.48, 37)
-    conf_bins = np.linspace(0, 1.0, 37)
+    var_max = max(0.60, float(np.quantile(var, 0.995)) + 0.02)
+    # Square cells: bin width in data space must match bin height (paper Fig 5).
+    n_var_bins = 30
+    n_conf_bins = max(n_var_bins, int(round(n_var_bins * (1.0 / var_max))))
+    var_bins = np.linspace(0, var_max, n_var_bins + 1)
+    conf_bins = np.linspace(0, 1.0, n_conf_bins + 1)
     sum_agree, _, _ = np.histogram2d(var, conf, bins=[var_bins, conf_bins], weights=agree)
     counts, _, _ = np.histogram2d(var, conf, bins=[var_bins, conf_bins])
     mean_agree = np.divide(
@@ -365,24 +399,42 @@ def plot_fig5_agreement_heatmap(rows: List[Dict], output_path: Path) -> None:
         where=counts > 0,
     )
 
-    fig, ax = plt.subplots(figsize=(7, 6))
-    cmap = LinearSegmentedColormap.from_list(
-        "agree", ["#d73027", "#fee08b", "#1a9850"]
-    )
-    im = ax.imshow(
+    plot_h = 7.0
+    plot_w = plot_h * (var_max / 1.0) + 1.4  # data aspect + colorbar
+    fig, ax = plt.subplots(figsize=(plot_w, plot_h), layout="constrained")
+    ax.set_facecolor(AGREEMENT_HEATMAP_BG)
+
+    cmap = LinearSegmentedColormap.from_list("paper_agreement", AGREEMENT_CMAP_COLORS)
+    cmap.set_bad(AGREEMENT_HEATMAP_BG)
+
+    mesh = ax.pcolormesh(
+        var_bins,
+        conf_bins,
         mean_agree.T,
-        origin="lower",
-        aspect="auto",
-        extent=[0, 0.48, 0, 1.0],
         cmap=cmap,
-        vmin=0.25,
-        vmax=0.95,
+        vmin=0.3,
+        vmax=1.0,
+        edgecolors="white",
+        linewidth=0.55,
+        shading="flat",
     )
-    cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label("Mean human agreement", fontsize=11)
-    ax.set_xlabel("Variability")
-    ax.set_ylabel("Confidence")
-    ax.set_title("Human agreement on the data map (Fig 5)")
+
+    ax.set_xlim(0, var_max)
+    ax.set_ylim(0, 1.0)
+    ax.set_xlabel("variability")
+    ax.set_ylabel("confidence")
+    ax.set_xticks([0.10, 0.26, 0.43, min(0.60, round(var_max, 2))])
+    ax.set_yticks([0.13, 0.38, 0.63, 0.87])
+    ax.set_aspect("equal")
+
+    cbar = fig.colorbar(mesh, ax=ax, shrink=0.92)
+    cbar.set_label("human agreement")
+    cbar.set_ticks(np.arange(0.3, 1.01, 0.1))
+
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.8)
+        spine.set_color("#cccccc")
+
     _save(fig, output_path)
 
 

@@ -6,6 +6,9 @@ set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/lib/experiment_env.sh"
 exp_activate_conda
 exp_apply_paper_defaults
+if [[ "${SUBSET_MODE:-0}" == "1" ]]; then
+  source "$(dirname "$0")/lib/subset_training.env"
+fi
 
 SESSION="${SESSION:-cs162-exp-maps-mnli-qnli}"
 GPU_MNLI="${GPU_MNLI:-0}"

@@ -6,7 +6,17 @@ set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/lib/experiment_env.sh"
 exp_activate_conda
 exp_apply_paper_defaults
+[[ -f "$(dirname "$0")/lib/fast_5hour.env" ]] && source "$(dirname "$0")/lib/fast_5hour.env"
 exp_require_input
+
+if [[ "${SKIP_TRAIN_FIG3:-0}" == "1" ]]; then
+  echo "SKIP_TRAIN_FIG3=1 — using existing results in ${FIG3_OUTPUT:-data/processed/easy_role}"
+  ROOT="$(exp_repo_root)"
+  bash "$ROOT/scripts/export_all_metrics.sh" pranav-scripts
+  "$PYTHON" "$ROOT/scripts/plot_from_metrics_csv.py" --experiment-tag fig3 --no-wandb
+  echo "=== Fig 3 complete (existing runs) ==="
+  exit 0
+fi
 
 SESSION="${SESSION:-cs162-exp-fig3}"
 OUTPUT_DIR="${OUTPUT_DIR:-data/processed/easy_role}"

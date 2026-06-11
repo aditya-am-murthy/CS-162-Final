@@ -6,7 +6,19 @@ set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/lib/experiment_env.sh"
 exp_activate_conda
 exp_apply_paper_defaults
+[[ -f "$(dirname "$0")/lib/fast_5hour.env" ]] && source "$(dirname "$0")/lib/fast_5hour.env"
 exp_require_input
+
+if [[ "${SKIP_TRAIN_FIG4:-0}" == "1" ]]; then
+  echo "SKIP_TRAIN_FIG4=1 — using existing results in ${FIG4_OUTPUT:-data/processed/noise_detection_paper}"
+  ROOT="$(exp_repo_root)"
+  OUT="${FIG4_OUTPUT:-data/processed/noise_detection_paper}"
+  bash "$ROOT/scripts/export_all_metrics.sh" pranav-scripts
+  "$PYTHON" "$ROOT/scripts/plot_from_metrics_csv.py" \
+    --fig4-shift-jsonl "$OUT/before_after_shift.jsonl" --experiment-tag fig4 --no-wandb
+  echo "=== Fig 4 complete (existing runs) ==="
+  exit 0
+fi
 
 SESSION="${SESSION:-cs162-exp-fig4}"
 GPU="${GPU:-0}"
