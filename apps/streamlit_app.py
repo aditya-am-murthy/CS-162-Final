@@ -17,6 +17,7 @@ from results_loader import (
     get_run_kind,
     get_run_dir,
     has_region_rows,
+    jsonl_has_region_field,
     list_dynamics_files,
     list_fixed_map_images,
     list_fixed_map_json,
@@ -24,6 +25,7 @@ from results_loader import (
     list_figure_paths,
     list_log_files,
     list_model_files,
+    list_region_values,
     list_runs,
     list_snapshot_images,
     list_snapshot_jsonl,
@@ -34,7 +36,7 @@ from results_loader import (
     load_summary,
     load_training_metrics,
     preview_jsonl_path,
-    preview_region_rows,
+    preview_region_rows_from_path,
     run_exists,
     summarize_report_rows,
 )
@@ -66,25 +68,29 @@ def _render_image_gallery(run_dir: Path, paths: list[Path], title: str, key: str
     st.image(str(selected_path), caption=selected_label, use_container_width=True)
 
 
-def _render_jsonl_preview_selector(
+def _render_image_preview(run_dir: Path, path: Path | None, title: str) -> None:
+    st.subheader(title)
+    if path is None or not path.is_file():
+        st.info(f"No file is available for {title.lower()}.")
+        return
+    st.image(str(path), caption=_path_label(run_dir, path), use_container_width=True)
+
+
+def _render_jsonl_preview_path(
     run_dir: Path,
-    paths: list[Path],
+    path: Path | None,
     title: str,
-    key: str,
     limit: int = 50,
 ) -> None:
     st.subheader(title)
-    if not paths:
-        st.info(f"No files found for {title.lower()}.")
+    if path is None or not path.is_file():
+        st.info(f"No file is available for {title.lower()}.")
         return
-    labels = [_path_label(run_dir, path) for path in paths]
-    selected_label = st.selectbox(title, labels, key=key)
-    selected_path = paths[labels.index(selected_label)]
-    rows = preview_jsonl_path(selected_path, limit=limit)
+    rows = preview_jsonl_path(path, limit=limit)
     if rows:
         st.dataframe(rows, use_container_width=True)
     else:
-        st.info(f"No preview rows found in `{selected_label}`.")
+        st.info(f"No preview rows found in `{_path_label(run_dir, path)}`.")
 
 
 def _render_file_list(run_dir: Path, paths: list[Path], title: str) -> None:
@@ -156,6 +162,17 @@ def _render_fixed_maps(run_dir: Path) -> None:
         st.info(f"No JSON or JSONL artifacts found under `fixed-maps/{mode}/`.")
 
 
+def _selected_path_from_labels(
+    paths: list[Path],
+    selected_label: str | None,
+    run_dir: Path,
+) -> Path | None:
+    if not paths or selected_label is None:
+        return None
+    labels = {_path_label(run_dir, path): path for path in paths}
+    return labels.get(selected_label)
+
+
 def _render_json_report(payload: dict | None) -> None:
     st.subheader("Report Summary")
     if not payload:
@@ -203,7 +220,9 @@ def main() -> None:
         )
         return
 
-    run_id = st.selectbox("Experiment run", runs)
+    with st.sidebar:
+        st.header("Navigation")
+        run_id = st.selectbox("Run or report", runs)
     run_dir = get_run_dir(run_id)
     run_kind = get_run_kind(run_dir)
 
@@ -227,6 +246,69 @@ def main() -> None:
     figure_paths = list_figure_paths(run_dir)
     log_files = list_log_files(run_dir)
     model_files = list_model_files(run_dir)
+    dynamics_jsonl = [path for path in dynamics_files if path.suffix == ".jsonl"]
+    fixed_map_modes = list_fixed_map_modes(run_dir)
+
+    with st.sidebar:
+        st.header("Artifacts")
+        if dynamics_jsonl:
+            dynamics_labels = [_path_label(run_dir, path) for path in dynamics_jsonl]
+            selected_dynamics_label = st.selectbox(
+                "Dynamics JSONL",
+                dynamics_labels,
+                key="sidebar_dynamics_jsonl",
+            )
+        else:
+            st.caption("Dynamics JSONL: not available")
+            selected_dynamics_label = None
+
+        if snapshot_images:
+            snapshot_image_labels = [_path_label(run_dir, path) for path in snapshot_images]
+            selected_snapshot_image_label = st.selectbox(
+                "Snapshot Image",
+                snapshot_image_labels,
+                key="sidebar_snapshot_image",
+            )
+        else:
+            st.caption("Snapshot images: not available")
+            selected_snapshot_image_label = None
+
+        if snapshot_jsonl:
+            snapshot_jsonl_labels = [_path_label(run_dir, path) for path in snapshot_jsonl]
+            selected_snapshot_jsonl_label = st.selectbox(
+                "Snapshot JSONL",
+                snapshot_jsonl_labels,
+                key="sidebar_snapshot_jsonl",
+            )
+        else:
+            st.caption("Snapshot JSONL: not available")
+            selected_snapshot_jsonl_label = None
+
+        if fixed_map_modes:
+            selected_fixed_map_mode = st.selectbox(
+                "Fixed Map Mode",
+                fixed_map_modes,
+                key="sidebar_fixed_map_mode",
+            )
+        else:
+            st.caption("Fixed maps: not available")
+            selected_fixed_map_mode = None
+
+    selected_dynamics_path = _selected_path_from_labels(
+        dynamics_jsonl,
+        selected_dynamics_label,
+        run_dir,
+    )
+    selected_snapshot_image_path = _selected_path_from_labels(
+        snapshot_images,
+        selected_snapshot_image_label,
+        run_dir,
+    )
+    selected_snapshot_jsonl_path = _selected_path_from_labels(
+        snapshot_jsonl,
+        selected_snapshot_jsonl_label,
+        run_dir,
+    )
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Figures", len(figure_paths))
@@ -247,42 +329,103 @@ def main() -> None:
 
     with dynamics_tab:
         _render_file_list(run_dir, dynamics_files, "Dynamics Files")
-        if has_region_rows(run_dir):
+        st.caption(
+            "Selected dynamics artifact: "
+            + (
+                f"`{_path_label(run_dir, selected_dynamics_path)}`"
+                if selected_dynamics_path is not None
+                else "not available"
+            )
+        )
+        if selected_dynamics_path is not None and jsonl_has_region_field(selected_dynamics_path):
+            region_options = list_region_values(selected_dynamics_path)
+            if not region_options:
+                st.info("This dynamics artifact has no detectable region values.")
+            else:
+                st.subheader("Filter by Region")
+                region = st.selectbox(
+                    "Region",
+                    region_options,
+                    key="region_filter",
+                )
+                region_rows = preview_region_rows_from_path(
+                    selected_dynamics_path,
+                    region=region,
+                    limit=50,
+                )
+                if region_rows:
+                    st.dataframe(region_rows, use_container_width=True)
+                else:
+                    st.info(f"No rows found for region `{region}` in the selected artifact.")
+        elif selected_dynamics_path is not None:
+            st.info("The selected dynamics artifact does not contain a `region` field.")
+        elif has_region_rows(run_dir):
             st.subheader("Filter by Region")
-            region = st.selectbox(
-                "Region",
-                ["ambiguous", "easy_to_learn", "hard_to_learn", "mixed"],
-                key="region_filter",
-            )
-            st.dataframe(
-                preview_region_rows(run_dir, region=region, limit=50),
-                use_container_width=True,
-            )
+            st.info("A region-labeled dynamics artifact exists, but no file is currently selectable.")
         else:
             st.info("No `cartography_with_regions.jsonl` preview is available for this run.")
-        _render_jsonl_preview_selector(
+        _render_jsonl_preview_path(
             run_dir,
-            [path for path in dynamics_files if path.suffix == ".jsonl"],
+            selected_dynamics_path,
             "Dynamics JSONL Preview",
-            key="dynamics_preview",
         )
 
     with snapshots_tab:
-        _render_image_gallery(
+        _render_image_preview(
             run_dir,
-            snapshot_images,
+            selected_snapshot_image_path,
             "Snapshot Images",
-            key="snapshot_images",
         )
-        _render_jsonl_preview_selector(
+        _render_jsonl_preview_path(
             run_dir,
-            snapshot_jsonl,
+            selected_snapshot_jsonl_path,
             "Snapshot JSONL Preview",
-            key="snapshot_jsonl",
         )
 
     with fixed_maps_tab:
-        _render_fixed_maps(run_dir)
+        if selected_fixed_map_mode is None:
+            st.subheader("Fixed Maps")
+            st.info("No `fixed-maps/` directory is available for this run.")
+        else:
+            st.subheader("Fixed Maps")
+            st.caption(f"Selected fixed-map mode: `{selected_fixed_map_mode}`")
+            images = list_fixed_map_images(run_dir, selected_fixed_map_mode)
+            json_files = list_fixed_map_json(run_dir, selected_fixed_map_mode)
+
+            if images:
+                _render_image_gallery(
+                    run_dir,
+                    images,
+                    f"{selected_fixed_map_mode} images",
+                    key=f"{selected_fixed_map_mode}_images",
+                )
+            else:
+                st.info(f"No images found under `fixed-maps/{selected_fixed_map_mode}/`.")
+
+            if json_files:
+                labels = [_path_label(run_dir, path) for path in json_files]
+                selected_label = st.selectbox(
+                    f"{selected_fixed_map_mode} JSON artifacts",
+                    labels,
+                    key=f"{selected_fixed_map_mode}_json",
+                )
+                selected_path = _selected_path_from_labels(json_files, selected_label, run_dir)
+                if selected_path is None:
+                    st.info("The selected fixed-map artifact is not available.")
+                elif selected_path.suffix == ".json":
+                    payload = load_json_from_path(selected_path)
+                    if payload is None:
+                        st.info("This JSON artifact could not be loaded.")
+                    else:
+                        st.json(payload)
+                else:
+                    rows = preview_jsonl_path(selected_path, limit=50)
+                    if rows:
+                        st.dataframe(rows, use_container_width=True)
+                    else:
+                        st.info("This JSONL artifact has no previewable rows.")
+            else:
+                st.info(f"No JSON or JSONL artifacts found under `fixed-maps/{selected_fixed_map_mode}/`.")
 
     with logs_tab:
         _render_file_list(run_dir, log_files, "Log Files")

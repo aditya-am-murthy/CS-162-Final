@@ -142,7 +142,7 @@ def has_region_rows(run_dir: Path) -> bool:
     if not run_dir.is_dir():
         return False
     dynamics_path = run_dir / "dynamics" / "cartography_with_regions.jsonl"
-    return dynamics_path.is_file()
+    return jsonl_has_region_field(dynamics_path)
 
 
 def preview_region_rows(
@@ -153,13 +153,29 @@ def preview_region_rows(
     if not run_dir.is_dir():
         return []
     dynamics_path = run_dir / "dynamics" / "cartography_with_regions.jsonl"
-    if not dynamics_path.is_file():
+    return preview_region_rows_from_path(dynamics_path, region=region, limit=limit)
+
+
+def preview_region_rows_from_path(
+    path: Path,
+    region: str,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    if not path.is_file():
         return []
 
     rows: list[dict[str, Any]] = []
-    with dynamics_path.open("r", encoding="utf-8") as handle:
+    with path.open("r", encoding="utf-8") as handle:
         for line in handle:
-            row = json.loads(line)
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue
             if row.get("region") == region:
                 rows.append(row)
             if len(rows) >= limit:
@@ -176,7 +192,13 @@ def preview_jsonl_path(path: Path, limit: int = 50) -> list[dict[str, Any]]:
             line = line.strip()
             if not line:
                 continue
-            rows.append(json.loads(line))
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            rows.append(row)
             if len(rows) >= limit:
                 break
     return rows
@@ -185,6 +207,26 @@ def preview_jsonl_path(path: Path, limit: int = 50) -> list[dict[str, Any]]:
 def load_training_metrics(run_dir: Path, limit: int = 200) -> list[dict[str, Any]]:
     metrics_path = run_dir / "logs" / "training_metrics.jsonl"
     return preview_jsonl_path(metrics_path, limit=limit)
+
+
+def jsonl_has_region_field(path: Path, sample_limit: int = 100) -> bool:
+    if not path.is_file():
+        return False
+    for row in preview_jsonl_path(path, limit=sample_limit):
+        if "region" in row:
+            return True
+    return False
+
+
+def list_region_values(path: Path, sample_limit: int = 500) -> list[str]:
+    if not path.is_file():
+        return []
+    regions = {
+        str(row["region"])
+        for row in preview_jsonl_path(path, limit=sample_limit)
+        if row.get("region") not in (None, "")
+    }
+    return sorted(regions)
 
 
 def summarize_report_rows(payload: dict[str, Any] | None) -> dict[str, Any]:
