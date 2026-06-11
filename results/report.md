@@ -1,6 +1,7 @@
 # CS-162 Dataset Cartography — Experiment Report
 
 **Paper:** *Dataset Cartography: Mapping and Diagnosing Datasets with Training Dynamics* (Swayamdipta et al., EMNLP 2020)  
+<<<<<<< Updated upstream
 **Project:** CS-162 Final — educational reimplementation with extensions  
 **Primary training entry point:** `scripts/dual_gpu_train_suite.py` (local 3-GPU suite; replaces `notebooks/colab_train_suite.ipynb`)
 
@@ -19,10 +20,43 @@ All three jobs launch **in parallel** on separate GPUs to verify loading, CUDA, 
 | cuda:0 | `distilbert_snli` | `snli` | DistilBERT | 500 / 200 | 2 |
 | cuda:1 | `llama_mini` | `dynamic` | Llama 3.2 1B (4-bit) | 200 / 200 | 1 |
 | cuda:2 | `ministral_mini` | `dynamic` | Ministral 3 3B (Unsloth 4-bit) | 200 / 200 | 1 |
+=======
+**Project:** CS-162 Final — training, dynamic maps, preference cartography, Streamlit-ready artifacts
+
+---
+
+## Results layout
+
+| Path | Purpose |
+|------|---------|
+| `results/report.md` | This file — constant overview (not tied to one run) |
+| `results/<YYYYMMDD_HHMMSS>_<task>/` | One folder per experiment run (timestamped) |
+| `results/experiment_index.json` | Index of all completed jobs and run IDs |
+| `experiments/runs/<run_id>/` | Full training workspace (checkpoints, logs, dynamics) |
+
+Each timestamped folder contains:
+
+```
+results/20260520_143022_snli_distilbert/
+  manifest.json          # metadata for Streamlit / reporting
+  config.json            # hyperparameters
+  summary.json           # device, paths, metrics
+  dynamics/
+    epoch_predictions.jsonl
+    cartography_coordinates.jsonl
+    cartography_with_regions.jsonl
+    region_trajectories.jsonl    # Idea #2 (if --dynamic)
+    snapshots/epoch_*_coordinates.jsonl
+  figures/               # data maps, preference maps, trajectory plots
+  logs/training_metrics.jsonl
+  models/final/          # saved model + tokenizer
+```
+>>>>>>> Stashed changes
 
 - **No W&B logging** (`--no-wandb`)
 - **Not archived** to `data/trained_models/` (ephemeral under `experiments/runs/`)
 
+<<<<<<< Updated upstream
 ### Phase 2 — Full training (W&B enabled by default)
 
 Three **parallel worker processes**, each pinned to one physical GPU via `CUDA_VISIBLE_DEVICES`:
@@ -141,10 +175,92 @@ python scripts/run_cartography_experiment.py --task preference --preset distilbe
 ```bash
 python scripts/run_cartography_experiment.py --task dynamic --preset roberta-base \
   --curriculum-after-epoch 2 --epochs 5 --wandb-run-name colab_dynamic
+=======
+## Training suite (`scripts/train_suite.py`)
+
+Single entry point for all models and follow-up ideas:
+
+```bash
+conda activate cs162-cartography
+pip install -r requirements-train.txt
+
+# Everything (encoders + Llama + Mistral + preference + instruction + dynamic maps)
+python scripts/train_suite.py --all --dynamic
+
+# SNLI encoder models only
+python scripts/train_suite.py --snli-encoders --dynamic
+
+# One job
+python scripts/train_suite.py --only snli_distilbert --max-train-samples 20000 --epochs 5
+```
+
+### Models trained on SNLI
+
+| Job ID | Model | Type |
+|--------|--------|------|
+| `snli_distilbert` | DistilBERT | Encoder classifier |
+| `snli_roberta_base` | RoBERTa-base | Encoder classifier |
+| `snli_llama_3_2_1b` | Llama-3.2-1B-Instruct | Causal LM + LoRA (4-bit) |
+| `snli_mistral_7b` | Mistral-7B-Instruct | Causal LM + LoRA (4-bit) |
+
+Paper default is RoBERTa-**large**; use `--only` with `roberta-large` via `train_and_collect_dynamics.py` if you have 24GB+ VRAM.
+
+---
+
+## Idea #1: Preference & instruction data maps
+
+**Goal:** Extend cartography to RLHF/DPO-style preference data and instruction tuning.
+
+**Runs:**
+- `preference_ultrafeedback` — `HuggingFaceH4/ultrafeedback_binarized` pairs (chosen/rejected)
+- `instruction_alpaca` — `yahma/alpaca-cleaned` prompt–response SFT
+
+**Dynamics:** Each epoch logs reward margin (log-prob chosen − log-prob rejected) or response log-prob; aggregated into **confidence** and **variability** like the paper.
+
+**Outputs:** `preference_data_map.png`, coordinates under `dynamics/`, high-variability pairs for DPO filtering (export via subset scripts).
+
+**Hypothesis:** High-variability preferences are most informative for alignment (less sycophancy, better reasoning) — test with MT-Bench / human eval after DPO on filtered subsets.
+
+---
+
+## Idea #2: Dynamic / iterative data maps
+
+**Goal:** Recompute maps during training; track region movement; adaptive curriculum.
+
+**Enabled with:** `--dynamic` on `train_suite.py`
+
+**Mechanism:**
+1. Every `--map-interval` epochs → snapshot `dynamics/snapshots/epoch_XXX_coordinates.jsonl`
+2. `region_trajectories.jsonl` — per-example path easy → ambiguous → hard
+3. **Curriculum sampler** — upsample ambiguous (2.5×), downsample easy (0.4×) before next epoch
+4. Figure: `dynamic_region_trajectories.png`
+
+**Use case:** Continual / multi-stage fine-tuning where static maps miss examples that change role over time.
+
+---
+
+## Core experiments (paper §2–§6)
+
+| § | Experiment | Script / run |
+|---|------------|----------------|
+| 2 | Training dynamics + data maps | All `snli_*` jobs + `07_generate_insight_figures.py` |
+| 3 | Data selection by region | `03_select_subsets.py` on trained coordinates |
+| 4 | Easy vs ambiguous ablation | `06_ambiguous_ablation.py` |
+| 5 | Mislabeled detection | `04_detect_mislabeled.py` |
+| 6 | Uncertainty / agreement | `05_uncertainty_checks.py` |
+
+After training, regenerate figures for a specific run:
+
+```bash
+python scripts/07_generate_insight_figures.py \
+  --input results/<run_id>/dynamics/cartography_with_regions.jsonl \
+  --run-id <run_id>
+>>>>>>> Stashed changes
 ```
 
 ---
 
+<<<<<<< Updated upstream
 ## Artifact layout
 
 | Location | Contents |
@@ -164,11 +280,37 @@ python scripts/run_cartography_experiment.py --task dynamic --preset roberta-bas
 3. **Run suite:** `python scripts/dual_gpu_train_suite.py`  
 4. **Idea #1:** preference / instruction experiments using archived encoders or fresh runs  
 5. **Analysis:** `scripts/02_build_data_map.py`, `07_generate_insight_figures.py`, or Streamlit over `results/`  
+=======
+## Streamlit app (preview)
+
+```bash
+pip install streamlit
+streamlit run apps/streamlit_app.py
+```
+
+Loads `results/<run_id>/` — future: upload dataset → trigger `train_suite` → filter regions interactively.
+
+---
+
+## Main insights (paper + project)
+
+1. **Data maps** from one training run diagnose easy / hard / ambiguous regions.
+2. **Ambiguous** points often maximize OOD gains when used as 33% train subsets.
+3. **Easy** points dominate and stabilize optimization but can hurt OOD if over-sampled.
+4. **Hard** points correlate with label noise; confidence-based filtering helps cleaning.
+5. **Preference maps** (Idea #1) apply the same logic to chosen/rejected margins for alignment data.
+6. **Dynamic maps** (Idea #2) show examples migrating between regions and support adaptive curricula.
+>>>>>>> Stashed changes
 
 ---
 
 ## References
 
+<<<<<<< Updated upstream
 - Swayamdipta, S., et al. (2020). *Dataset Cartography.* EMNLP 2020.  
 - [allenai/cartography](https://github.com/allenai/cartography)  
 - Course pipeline: `README.md`, `scripts/00`–`07`, synthetic figures under `results/20260525_000000_baseline_synthetic/`
+=======
+- Swayamdipta et al. (2020). EMNLP. [Paper](https://aclanthology.org/2020.emnlp-main.746/)
+- [allenai/cartography](https://github.com/allenai/cartography)
+>>>>>>> Stashed changes

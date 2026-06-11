@@ -4,4 +4,10 @@ scikit-learn
 scipy
 tqdm
 wandb
+<<<<<<< Updated upstream
 streamlit
+=======
+
+# optional: pip install -r requirements-train.txt && streamlit
+
+>>>>>>> Stashed changes

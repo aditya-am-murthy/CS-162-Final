@@ -14,12 +14,16 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
+import os
 import random
 import shlex
+import subprocess
 import sys
+import time
 from collections import Counter
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 _root = Path(__file__).resolve().parents[1]
 if str(_root) not in sys.path:
@@ -39,9 +43,12 @@ from scripts.common import (
     init_wandb,
     load_hf_credentials,
     load_pipeline_config,
+    load_wandb_credentials,
+    resolve_hf_token,
     use_wandb,
 )
 
+TRAIN_SCRIPT = _root / "scripts" / "train_and_collect_dynamics.py"
 
 DEFAULT_AMBIGUOUS_RATIOS = (0.50, 0.33, 0.25, 0.17, 0.10, 0.05, 0.01)
 DEFAULT_REPLACE_RATIOS = (0.0, 0.10, 0.25, 0.50, 0.75)
@@ -165,28 +172,143 @@ def _region_counts(rows: list[dict]) -> dict[str, int]:
     return dict(Counter(str(r.get("region", "missing")) for r in rows))
 
 
+def _parse_gpu_list(gpus: str) -> List[int]:
+    ids = [int(part.strip()) for part in gpus.split(",") if part.strip()]
+    if not ids:
+        raise ValueError("--gpus must list at least one GPU id, e.g. 0,1,2,3")
+    return ids
+
+
+def _child_env(gpu_id: int) -> Dict[str, str]:
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    env["PYTHONUNBUFFERED"] = "1"
+    token, _ = resolve_hf_token(_root / "hf_credentials.txt")
+    if token:
+        env["HF_TOKEN"] = token
+        env["HUGGING_FACE_HUB_TOKEN"] = token
+    wandb_creds = load_wandb_credentials()
+    if wandb_creds.get("api_key"):
+        env["WANDB_API_KEY"] = wandb_creds["api_key"]
+    return env
+
+
+def _wandb_prefix(args: argparse.Namespace) -> str:
+    return args.wandb_run_name or f"easy_role_{args.dataset}"
+
+
+def _wandb_group(args: argparse.Namespace) -> str:
+    return args.wandb_group or _wandb_prefix(args)
+
+
+def _wandb_run_name(args: argparse.Namespace, entry_name: str, restart_idx: int) -> str:
+    return f"{_wandb_prefix(args)}_{entry_name}_r{restart_idx:02d}"
+
+
+def _job_key(entry: dict, restart_idx: int) -> str:
+    return f"{entry['name']}_r{restart_idx:02d}"
+
+
+def _tail_jsonl(path: Path) -> Optional[dict]:
+    if not path.is_file():
+        return None
+    last: Optional[dict] = None
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                last = json.loads(line)
+    return last
+
+
+def _sync_active_jobs(
+    args: argparse.Namespace,
+    active: Dict[int, Tuple[Any, ...]],
+    last_epoch: Dict[str, int],
+    epoch_bar: tqdm,
+    jobs_done: int,
+) -> None:
+    payload: Dict[str, Any] = {
+        "orchestrator/jobs_active": len(active),
+        "orchestrator/jobs_completed": jobs_done,
+    }
+    postfix: List[str] = []
+    for gpu_id, (_proc, entry, restart_idx, run_dir, *_rest) in active.items():
+        latest = _tail_jsonl(run_dir / "training_metrics.jsonl")
+        key = _job_key(entry, restart_idx)
+        if not latest:
+            postfix.append(f"gpu{gpu_id}:{key}:load")
+            continue
+        ep = int(latest.get("epoch", 0))
+        prev = last_epoch.get(key, 0)
+        if ep > prev:
+            epoch_bar.update(ep - prev)
+            last_epoch[key] = ep
+            val_acc_new = latest.get("val_accuracy")
+            loss_new = latest.get("train_loss")
+            msg = f"[epoch {ep}/{args.epochs}] {key} (gpu {gpu_id})"
+            if loss_new is not None:
+                msg += f" loss={float(loss_new):.4f}"
+            if val_acc_new is not None:
+                msg += f" val_acc={float(val_acc_new):.4f}"
+            tqdm.write(msg)
+        val_acc = latest.get("val_accuracy")
+        train_loss = latest.get("train_loss")
+        postfix.append(f"gpu{gpu_id}:{key}e{ep}/{args.epochs}")
+        payload[f"active/{key}/epoch"] = ep
+        if val_acc is not None:
+            payload[f"active/{key}/val_accuracy"] = float(val_acc)
+        if train_loss is not None:
+            payload[f"active/{key}/train_loss"] = float(train_loss)
+
+    if postfix:
+        epoch_bar.set_postfix_str(" | ".join(postfix[:5]), refresh=False)
+    if use_wandb(args) and len(payload) > 2:
+        import wandb
+
+        wandb.log(payload, step=epoch_bar.n)
+
+
 def _train_command(
     *,
     subset_path: Path,
     output_log: Path,
+    summary_path: Path,
+    metrics_path: Path,
+    figures_dir: Path,
     dataset: str,
     preset: str,
     model_name: str | None,
     epochs: int,
+    batch_size: int | None,
+    learning_rate: float,
+    max_length: int,
     max_eval_samples: int,
     winogrande_config: str,
     seed: int,
+    subset_name: str,
+    subset_strategy: str,
+    wandb_run_name: str | None,
+    wandb_group: str | None,
+    wandb_project: str,
+    wandb_entity: str | None,
     no_wandb: bool,
+    no_fp16: bool,
+    no_4bit: bool,
 ) -> list[str]:
     cmd = [
-        "python",
-        "scripts/train_and_collect_dynamics.py",
+        sys.executable,
+        str(TRAIN_SCRIPT),
         "--dataset",
         dataset,
         "--preset",
         preset,
         "--epochs",
         str(epochs),
+        "--learning-rate",
+        str(learning_rate),
+        "--max-length",
+        str(max_length),
         "--max-train-samples",
         "0",
         "--max-eval-samples",
@@ -195,15 +317,39 @@ def _train_command(
         str(subset_path),
         "--output",
         str(output_log),
+        "--summary-out",
+        str(summary_path),
+        "--metrics-out",
+        str(metrics_path),
+        "--figures-dir",
+        str(figures_dir),
+        "--subset-name",
+        subset_name,
+        "--subset-strategy",
+        subset_strategy,
         "--seed",
         str(seed),
+        "--wandb-project",
+        wandb_project,
     ]
+    if batch_size is not None:
+        cmd.extend(["--batch-size", str(batch_size)])
     if dataset == "winogrande":
         cmd.extend(["--winogrande-config", winogrande_config])
     if model_name:
         cmd.extend(["--model-name", model_name])
+    if wandb_run_name:
+        cmd.extend(["--wandb-run-name", wandb_run_name])
+    if wandb_group:
+        cmd.extend(["--wandb-group", wandb_group])
+    if wandb_entity:
+        cmd.extend(["--wandb-entity", wandb_entity])
     if no_wandb:
         cmd.append("--no-wandb")
+    if no_fp16:
+        cmd.append("--no-fp16")
+    if no_4bit:
+        cmd.append("--no-4bit")
     return cmd
 
 
@@ -273,71 +419,273 @@ def _entry(
     }
 
 
-def _train_subsets(args: argparse.Namespace, entries: list[dict]) -> list[dict]:
-    from ml_cartography.training.glue_trainer import (
-        MODEL_PRESETS,
-        TrainConfig,
-        apply_preset_defaults,
-        load_guids_from_jsonl,
-        train_and_collect_dynamics,
-    )
-
-    load_hf_credentials()
-    model_name = args.model_name or MODEL_PRESETS.get(args.preset, args.preset)
+def _training_jobs(
+    args: argparse.Namespace,
+    entries: list[dict],
+) -> List[Tuple[dict, int, Path, Path, Path, list[str]]]:
     train_entries = entries[: args.limit_training_runs] if args.limit_training_runs else entries
-    results: list[dict] = []
-
-    for entry in tqdm(train_entries, desc="retraining subsets"):
+    jobs: List[Tuple[dict, int, Path, Path, Path, list[str]]] = []
+    for entry in train_entries:
         subset_path = Path(entry["path"])
         for restart_idx in range(args.restarts):
             run_seed = args.seed + restart_idx
-            run_dir = args.output_dir / "training_runs" / entry["name"] / f"restart_{restart_idx:02d}"
-            cfg = TrainConfig(
+            run_dir = (
+                args.output_dir
+                / "training_runs"
+                / entry["name"]
+                / f"restart_{restart_idx:02d}"
+            )
+            run_dir.mkdir(parents=True, exist_ok=True)
+            output_log = run_dir / "epoch_predictions.jsonl"
+            summary_path = run_dir / "summary.json"
+            metrics_path = run_dir / "training_metrics.jsonl"
+            figures_dir = run_dir / "figures"
+            cmd = _train_command(
+                subset_path=subset_path,
+                output_log=output_log,
+                summary_path=summary_path,
+                metrics_path=metrics_path,
+                figures_dir=figures_dir,
                 dataset=args.dataset,
-                model_name=model_name,
-                max_train_samples=None,
-                max_eval_samples=None if args.max_eval_samples == 0 else args.max_eval_samples,
+                preset=args.preset,
+                model_name=args.model_name,
                 epochs=args.epochs,
+                batch_size=args.batch_size,
                 learning_rate=args.learning_rate,
                 max_length=args.max_length,
-                seed=run_seed,
-                fp16=not args.no_fp16,
-                output_logs=run_dir / "epoch_predictions.jsonl",
-                checkpoint_dir=run_dir / "checkpoints" if args.save_checkpoints else None,
-                subset_guids=load_guids_from_jsonl(subset_path),
-                snapshot_dir=run_dir / "snapshots",
-                dynamic_snapshots=False,
+                max_eval_samples=args.max_eval_samples,
                 winogrande_config=args.winogrande_config,
+                seed=run_seed,
+                subset_name=entry["name"],
+                subset_strategy=entry["group"],
+                wandb_run_name=_wandb_run_name(args, entry["name"], restart_idx),
+                wandb_group=_wandb_group(args),
+                wandb_project=args.wandb_project,
+                wandb_entity=args.wandb_entity,
+                no_wandb=args.no_wandb,
+                no_fp16=args.no_fp16,
+                no_4bit=args.no_4bit,
             )
-            cfg = apply_preset_defaults(cfg, args.preset)
-            if args.batch_size is not None:
-                cfg.batch_size = args.batch_size
-            if args.no_4bit:
-                cfg.load_in_4bit = False
+            jobs.append((entry, restart_idx, run_dir, output_log, summary_path, cmd))
+    return jobs
 
-            summary = train_and_collect_dynamics(cfg)
-            result = {
-                "subset": entry["name"],
-                "restart": restart_idx,
-                "seed": run_seed,
-                "subset_path": str(subset_path),
-                **summary,
-            }
-            results.append(result)
 
-            if use_wandb(args):
-                import wandb
+def _run_job_subprocess(cmd: list[str], gpu_id: int) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        cmd,
+        cwd=str(_root),
+        env=_child_env(gpu_id),
+        text=True,
+        capture_output=True,
+    )
 
-                wandb.log(
-                    {
-                        "train/subset": entry["name"],
-                        "train/restart": restart_idx,
-                        "train/final_val_accuracy": summary["final_val_accuracy"],
-                        "train/num_train": summary["num_train"],
-                    }
+
+def _collect_job_result(
+    entry: dict,
+    restart_idx: int,
+    run_dir: Path,
+    summary_path: Path,
+    gpu_id: int,
+    proc: subprocess.CompletedProcess[str],
+) -> dict:
+    if proc.returncode != 0:
+        err_tail = (proc.stderr or proc.stdout or "")[-4000:]
+        if (run_dir / "train.log").is_file():
+            err_tail = (run_dir / "train.log").read_text(encoding="utf-8")[-4000:]
+        raise RuntimeError(
+            f"training failed: {entry['name']} restart {restart_idx} on cuda:{gpu_id}\n{err_tail}"
+        )
+    if summary_path.is_file():
+        with summary_path.open(encoding="utf-8") as f:
+            summary = json.load(f)
+    else:
+        summary = {}
+    return {
+        "subset": entry["name"],
+        "group": entry["group"],
+        "restart": restart_idx,
+        "seed": int(entry.get("seed", 0)) + restart_idx,
+        "subset_path": entry["path"],
+        "gpu_id": gpu_id,
+        "run_dir": str(run_dir),
+        **summary,
+    }
+
+
+def _train_subsets_parallel(
+    args: argparse.Namespace,
+    entries: list[dict],
+) -> list[dict]:
+    gpu_ids = _parse_gpu_list(args.gpus)
+    jobs = _training_jobs(args, entries)
+    results: list[dict] = []
+    pending = list(jobs)
+    active: Dict[int, Tuple[Any, ...]] = {}
+
+    total_epochs = len(jobs) * args.epochs
+    last_epoch: Dict[str, int] = {}
+    jobs_done = 0
+
+    print(f"training {len(jobs)} jobs ({total_epochs} epochs total) across GPUs {gpu_ids}")
+
+    epoch_bar = tqdm(total=total_epochs, desc="training epochs", unit="ep")
+    job_bar = tqdm(total=len(jobs), desc="jobs completed", unit="job", position=1)
+
+    try:
+        while pending or active:
+            for gpu_id in gpu_ids:
+                if gpu_id in active or not pending:
+                    continue
+                job = pending.pop(0)
+                entry, restart_idx, run_dir, _output_log, summary_path, cmd = job
+                log_path = run_dir / "train.log"
+                print(
+                    f"\n>>> launch cuda:{gpu_id} [{entry['name']} restart {restart_idx}]"
+                )
+                log_f = log_path.open("w", encoding="utf-8")
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(_root),
+                    env=_child_env(gpu_id),
+                    stdout=log_f,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+                active[gpu_id] = (
+                    proc,
+                    entry,
+                    restart_idx,
+                    run_dir,
+                    summary_path,
+                    job,
+                    log_f,
                 )
 
+            _sync_active_jobs(args, active, last_epoch, epoch_bar, jobs_done)
+
+            finished: List[int] = []
+            for gpu_id, (
+                proc,
+                entry,
+                restart_idx,
+                run_dir,
+                summary_path,
+                _job,
+                log_f,
+            ) in active.items():
+                rc = proc.poll()
+                if rc is None:
+                    continue
+                finished.append(gpu_id)
+                log_f.close()
+                err_tail = ""
+                if rc != 0 and (run_dir / "train.log").is_file():
+                    err_tail = (run_dir / "train.log").read_text(encoding="utf-8")[-4000:]
+                completed = subprocess.CompletedProcess(
+                    args=proc.args,
+                    returncode=rc,
+                    stdout=err_tail,
+                    stderr="",
+                )
+                result = _collect_job_result(
+                    entry, restart_idx, run_dir, summary_path, gpu_id, completed
+                )
+                results.append(result)
+                key = _job_key(entry, restart_idx)
+                remaining = args.epochs - last_epoch.get(key, 0)
+                if remaining > 0:
+                    epoch_bar.update(remaining)
+                    last_epoch[key] = args.epochs
+                jobs_done += 1
+                job_bar.update(1)
+                if use_wandb(args):
+                    import wandb
+
+                    wandb.log(
+                        {
+                            "orchestrator/jobs_completed": jobs_done,
+                            f"final/{key}/val_accuracy": result.get("final_val_accuracy"),
+                            f"final/{key}/num_train": result.get("num_train"),
+                        },
+                        step=epoch_bar.n,
+                    )
+
+            for gpu_id in finished:
+                del active[gpu_id]
+
+            if active and not finished:
+                time.sleep(5)
+    finally:
+        epoch_bar.close()
+        job_bar.close()
+
     return results
+
+
+def _train_subsets_sequential(
+    args: argparse.Namespace,
+    entries: list[dict],
+) -> list[dict]:
+    gpu_ids = _parse_gpu_list(args.gpus)
+    gpu_id = gpu_ids[0]
+    jobs = _training_jobs(args, entries)
+    results: list[dict] = []
+
+    for entry, restart_idx, run_dir, _output_log, summary_path, cmd in tqdm(
+        jobs, desc="retraining subsets"
+    ):
+        print(f"\n>>> cuda:{gpu_id} [{entry['name']} restart {restart_idx}]")
+        proc = _run_job_subprocess(cmd, gpu_id)
+        results.append(
+            _collect_job_result(entry, restart_idx, run_dir, summary_path, gpu_id, proc)
+        )
+
+    return results
+
+
+def _train_subsets(args: argparse.Namespace, entries: list[dict]) -> list[dict]:
+    load_hf_credentials()
+    if args.sequential:
+        return _train_subsets_sequential(args, entries)
+    return _train_subsets_parallel(args, entries)
+
+
+def _export_train_command(
+    args: argparse.Namespace,
+    *,
+    entry: dict,
+    subset_path: Path,
+    run_dir: Path,
+    restart_idx: int = 0,
+) -> list[str]:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    run_seed = args.seed + restart_idx
+    return _train_command(
+        subset_path=subset_path,
+        output_log=run_dir / "epoch_predictions.jsonl",
+        summary_path=run_dir / "summary.json",
+        metrics_path=run_dir / "training_metrics.jsonl",
+        figures_dir=run_dir / "figures",
+        dataset=args.dataset,
+        preset=args.preset,
+        model_name=args.model_name,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        max_length=args.max_length,
+        max_eval_samples=args.max_eval_samples,
+        winogrande_config=args.winogrande_config,
+        seed=run_seed,
+        subset_name=entry["name"],
+        subset_strategy=entry["group"],
+        wandb_run_name=_wandb_run_name(args, entry["name"], restart_idx),
+        wandb_group=_wandb_group(args),
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        no_wandb=args.no_wandb,
+        no_fp16=args.no_fp16,
+        no_4bit=args.no_4bit,
+    )
 
 
 def main() -> None:
@@ -383,6 +731,16 @@ def main() -> None:
     parser.add_argument("--winogrande-config", default="winogrande_xl")
     parser.add_argument("--restarts", type=int, default=1)
     parser.add_argument("--limit-training-runs", type=int, default=0)
+    parser.add_argument(
+        "--gpus",
+        default="0,1,2,3,4",
+        help="Comma-separated GPU ids for parallel training (e.g. 0,1,2,3,4)",
+    )
+    parser.add_argument(
+        "--sequential",
+        action="store_true",
+        help="Run training jobs one at a time on the first GPU in --gpus",
+    )
     parser.add_argument("--no-fp16", action="store_true")
     parser.add_argument("--no-4bit", action="store_true")
     parser.add_argument("--save-checkpoints", action="store_true")
@@ -403,6 +761,13 @@ def main() -> None:
     if any("region" not in row for row in rows):
         rows = _annotate_regions(rows)
 
+    orchestrator_name = (
+        f"{_wandb_prefix(args)}_orchestrator" if args.train else _wandb_prefix(args)
+    )
+    saved_run_name = args.wandb_run_name
+    args.wandb_run_name = orchestrator_name
+    if not args.wandb_group:
+        args.wandb_group = _wandb_group(args)
     init_wandb(
         args,
         job_type="role_easy_to_learn",
@@ -414,11 +779,13 @@ def main() -> None:
             "core_ambiguous_ratio": args.core_ambiguous_ratio,
             "easy_source": args.easy_source,
             "train": args.train,
+            "gpus": args.gpus,
+            "epochs": args.epochs,
         },
     )
+    args.wandb_run_name = saved_run_name
 
     subsets_dir = args.output_dir / "subsets"
-    logs_dir = args.output_dir / "command_logs"
     entries: list[dict] = []
     commands: list[list[str]] = []
 
@@ -438,18 +805,13 @@ def main() -> None:
         )
         entries.append(entry)
 
+        run_dir = args.output_dir / "training_runs" / name / "restart_00"
         commands.append(
-            _train_command(
+            _export_train_command(
+                args,
+                entry=entry,
                 subset_path=path,
-                output_log=logs_dir / f"{name}.jsonl",
-                dataset=args.dataset,
-                preset=args.preset,
-                model_name=args.model_name,
-                epochs=args.epochs,
-                max_eval_samples=args.max_eval_samples,
-                winogrande_config=args.winogrande_config,
-                seed=args.seed,
-                no_wandb=args.no_wandb,
+                run_dir=run_dir,
             )
         )
 
@@ -467,18 +829,13 @@ def main() -> None:
                 seed=args.seed,
             )
             entries.append(entry)
+            run_dir = args.output_dir / "training_runs" / name / "restart_00"
             commands.append(
-                _train_command(
+                _export_train_command(
+                    args,
+                    entry=entry,
                     subset_path=path,
-                    output_log=logs_dir / f"{name}.jsonl",
-                    dataset=args.dataset,
-                    preset=args.preset,
-                    model_name=args.model_name,
-                    epochs=args.epochs,
-                    max_eval_samples=args.max_eval_samples,
-                    winogrande_config=args.winogrande_config,
-                    seed=args.seed,
-                    no_wandb=args.no_wandb,
+                    run_dir=run_dir,
                 )
             )
 
@@ -509,18 +866,13 @@ def main() -> None:
             seed=args.seed,
         )
         entries.append(entry)
+        run_dir = args.output_dir / "training_runs" / name / "restart_00"
         commands.append(
-            _train_command(
+            _export_train_command(
+                args,
+                entry=entry,
                 subset_path=path,
-                output_log=logs_dir / f"{name}.jsonl",
-                dataset=args.dataset,
-                preset=args.preset,
-                model_name=args.model_name,
-                epochs=args.epochs,
-                max_eval_samples=args.max_eval_samples,
-                winogrande_config=args.winogrande_config,
-                seed=args.seed,
-                no_wandb=args.no_wandb,
+                run_dir=run_dir,
             )
         )
 
@@ -558,8 +910,9 @@ def main() -> None:
     if args.train:
         train_results = _train_subsets(args, entries)
         results_path = args.output_dir / "train_results.json"
-        write_json(results_path, {"results": train_results})
+        write_json(results_path, {"results": train_results, "gpus": args.gpus})
         manifest["train_results"] = train_results
+        manifest["gpus"] = args.gpus
         write_json(manifest_path, manifest)
 
     print(f"wrote {len(entries)} subset definitions")
