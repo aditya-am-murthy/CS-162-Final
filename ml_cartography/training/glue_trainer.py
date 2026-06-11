@@ -43,7 +43,6 @@ class TrainConfig:
     output_logs: Path = Path("data/raw/epoch_predictions_trained.jsonl")
     checkpoint_dir: Optional[Path] = None
     subset_guids: Optional[Set[str]] = None
-<<<<<<< Updated upstream
     label_overrides: Optional[Dict[str, int]] = None
     # dynamic maps (Idea #2)
     dynamic_snapshots: bool = True
@@ -58,12 +57,6 @@ class TrainConfig:
     # ministral + unsloth 4-bit: full backbone FT often dtype/checkpoint errors on T4
     ministral_freeze_backbone: bool = True
     winogrande_config: str = "winogrande_xl"
-=======
-    paths: Optional["ExperimentPaths"] = None
-    map_interval: int = 1
-    curriculum_enabled: bool = False
-    task_slug: str = "snli_encoder"
->>>>>>> Stashed changes
 
 
 class NliDataset(Dataset):
@@ -825,7 +818,6 @@ def train_and_collect_dynamics(
     if not cfg.load_in_4bit:
         model.to(device)
 
-<<<<<<< Updated upstream
     if is_winogrande:
         train_ds = WinograndePairDataset(train_raw)
         val_loader = None
@@ -1018,92 +1010,6 @@ def train_and_collect_dynamics(
                     title=f"{map_title} (by region)",
                 )
                 epoch_figure_paths.append(regions_path)
-=======
-    train_ds = NliDataset(train_rows, tokenizer, cfg.max_length)
-    val_ds = NliDataset(val_rows, tokenizer, cfg.max_length)
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=cfg.eval_batch_size,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=device.type == "cuda",
-    )
-    collect_loader = DataLoader(
-        train_ds,
-        batch_size=cfg.eval_batch_size,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=device.type == "cuda",
-    )
-
-    if cfg.paths:
-        cfg.output_logs = cfg.paths.epoch_logs_path()
-        cfg.checkpoint_dir = cfg.paths.checkpoints_dir
-    cfg.output_logs.parent.mkdir(parents=True, exist_ok=True)
-    all_records: List[Dict] = []
-    snapshots: List = []
-    guid_order = [r["guid"] for r in train_rows]
-    sample_weights = None
-
-    def _make_train_loader():
-        if cfg.curriculum_enabled and sample_weights is not None:
-            from ml_cartography.training.dynamic_cartography import guid_weights_to_sample_weights
-
-            weights = guid_weights_to_sample_weights(guid_order, sample_weights)
-            sampler = WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
-            return DataLoader(
-                train_ds,
-                batch_size=cfg.batch_size,
-                sampler=sampler,
-                num_workers=0,
-                pin_memory=device.type == "cuda",
-            )
-        return DataLoader(
-            train_ds,
-            batch_size=cfg.batch_size,
-            shuffle=True,
-            num_workers=0,
-            pin_memory=device.type == "cuda",
-        )
-
-    train_loader = _make_train_loader()
-    total_steps = max(len(train_loader) * cfg.epochs, 1)
-    warmup_steps = int(total_steps * cfg.warmup_ratio)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.learning_rate)
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer, warmup_steps, total_steps
-    )
-
-    for epoch in range(1, cfg.epochs + 1):
-        train_loss = _train_epoch(
-            model, train_loader, optimizer, scheduler, device, scaler, epoch
-        )
-        val_acc = _evaluate_accuracy(model, val_loader, device)
-        epoch_records = _collect_epoch_predictions(
-            model, collect_loader, device, epoch
-        )
-        all_records.extend(epoch_records)
-
-        if cfg.paths:
-            from ml_cartography.training.dynamic_cartography import (
-                append_training_metric,
-                curriculum_weights_from_coordinates,
-                records_to_coordinates,
-                save_snapshot,
-            )
-
-            append_training_metric(
-                cfg.paths.training_metrics_path(),
-                {"epoch": epoch, "train_loss": train_loss, "val_accuracy": val_acc},
-            )
-            if epoch % cfg.map_interval == 0:
-                coords = records_to_coordinates(all_records, max_epoch=epoch)
-                snap = save_snapshot(coords, cfg.paths.snapshots_dir, epoch)
-                snapshots.append((epoch, snap))
-                if cfg.curriculum_enabled:
-                    sample_weights = curriculum_weights_from_coordinates(coords)
-                    train_loader = _make_train_loader()
->>>>>>> Stashed changes
 
         if wandb_run is not None:
             import wandb
@@ -1147,7 +1053,6 @@ def train_and_collect_dynamics(
         for row in all_records:
             f.write(json.dumps(row) + "\n")
 
-<<<<<<< Updated upstream
     if cfg.checkpoint_dir:
         final_dir = cfg.checkpoint_dir.parent / "final"
         final_dir.mkdir(parents=True, exist_ok=True)
@@ -1164,25 +1069,6 @@ def train_and_collect_dynamics(
             print(f"using device: {device} ({torch.cuda.get_device_name(0)})")
         except Exception:
             print(f"using device: {device}")
-=======
-    if cfg.paths:
-        from ml_cartography.analysis.data_map import annotate_regions
-        from ml_cartography.training.dynamic_cartography import (
-            build_region_trajectories,
-            records_to_coordinates,
-        )
-        from ml_cartography.utils.io import write_jsonl
-
-        coords = records_to_coordinates(all_records)
-        write_jsonl(cfg.paths.coordinates_path(), coords)
-        write_jsonl(cfg.paths.regions_path(), annotate_regions(coords))
-        if snapshots:
-            write_jsonl(cfg.paths.trajectories_path(), build_region_trajectories(snapshots))
-        model.save_pretrained(cfg.paths.models_dir)
-        tokenizer.save_pretrained(cfg.paths.models_dir)
-
-    print(f"using device: {device}")
->>>>>>> Stashed changes
     summary = {
         "device": str(device),
         "dataset": cfg.dataset,
@@ -1197,23 +1083,7 @@ def train_and_collect_dynamics(
         ),
         "output_logs": str(cfg.output_logs),
         "num_log_rows": len(all_records),
-<<<<<<< Updated upstream
         "snapshot_dir": str(snapshot_dir) if snapshot_dir else None,
         "num_snapshots": len(snapshot_paths),
     }
     return summary
-=======
-        "run_id": cfg.paths.run_id if cfg.paths else None,
-    }
-    return summary
-
-
-MODEL_PRESETS = {
-    "distilbert": "distilbert-base-uncased",
-    "roberta-base": "roberta-base",
-    "roberta-large": "roberta-large",
-    "bert-base": "bert-base-uncased",
-    "llama-3.2-1b": "meta-llama/Llama-3.2-1B-Instruct",
-    "mistral-7b": "mistralai/Mistral-7B-Instruct-v0.3",
-}
->>>>>>> Stashed changes
