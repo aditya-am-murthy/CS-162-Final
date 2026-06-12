@@ -188,8 +188,16 @@ def save_transition_heatmap(
     ax.set_title(title)
     for i in range(len(REGIONS)):
         for j in range(len(REGIONS)):
-            if transition[i, j] > 0:
-                ax.text(j, i, str(transition[i, j]), ha="center", va="center", fontsize=8)
+            count = int(transition[i, j])
+            ax.text(
+                j,
+                i,
+                str(count),
+                ha="center",
+                va="center",
+                fontsize=8,
+                color="#555555" if count == 0 else "black",
+            )
     fig.colorbar(im, ax=ax, fraction=0.046, label="P(col|row)")
     fig.tight_layout()
     fig.savefig(output_path, dpi=160)

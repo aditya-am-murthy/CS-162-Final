@@ -85,8 +85,8 @@ Four extensions beyond the paper body. Figures in [`extension_outputs/`](extensi
 **Extra #4** mirrors paper §5 at **1% flip rate** on both arms: easy-injected (paper) vs hard-injected (extension). Metrics include antisymmetric confidence shift, % recovered (Δconf > 0.05), region transition matrices, and detector cross-eval on original map cohorts.
 
 ```bash
-# tmux + single hard-arm run across 5 GPUs (DataParallel) + W&B + per-epoch progress
-GPUS=0,1,2,3,4 bash scripts/run_exp_11_extra_bilateral_noise.sh
+# tmux + single-GPU subsampled run (5k train / 1k eval) + W&B + total/epoch progress bars
+bash scripts/run_exp_11_extra_bilateral_noise.sh
 
 # Regenerate all extension figures (1–4)
 python scripts/collect_extension_outputs.py

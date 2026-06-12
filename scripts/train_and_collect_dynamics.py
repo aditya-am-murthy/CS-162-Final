@@ -3,8 +3,27 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
+
+
+def _pin_single_gpu_from_argv() -> None:
+    """Set CUDA_VISIBLE_DEVICES before torch init when --gpu is passed."""
+    gpu_id = None
+    argv = sys.argv[1:]
+    for idx, arg in enumerate(argv):
+        if arg == "--gpu" and idx + 1 < len(argv):
+            gpu_id = argv[idx + 1]
+            break
+        if arg.startswith("--gpu="):
+            gpu_id = arg.split("=", 1)[1]
+            break
+    if gpu_id is not None and "CUDA_VISIBLE_DEVICES" not in os.environ:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+
+_pin_single_gpu_from_argv()
 
 _root = Path(__file__).resolve().parents[1]
 if str(_root) not in sys.path:
@@ -97,6 +116,12 @@ def main() -> None:
     )
     parser.add_argument("--no-fp16", action="store_true", help="Disable mixed precision")
     parser.add_argument(
+        "--gpu",
+        type=int,
+        default=0,
+        help="CUDA device index for single-GPU training (sets CUDA_VISIBLE_DEVICES)",
+    )
+    parser.add_argument(
         "--multi-gpu",
         action="store_true",
         help="Spread one training run across all visible CUDA devices (DataParallel)",
@@ -124,6 +149,8 @@ def main() -> None:
     )
     add_wandb_args(parser)
     args = parser.parse_args()
+    if not args.multi_gpu and "CUDA_VISIBLE_DEVICES" not in os.environ:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
     load_hf_credentials()
 
     model_name = args.model_name or MODEL_PRESETS[args.preset]

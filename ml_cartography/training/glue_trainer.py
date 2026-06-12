@@ -126,6 +126,7 @@ PRESET_DEFAULTS: Dict[str, Dict] = {
         "gradient_accumulation_steps": 4,
         "learning_rate": 1e-5,
     },
+    "roberta-large": {"batch_size": 16, "max_length": 256, "load_in_4bit": False},
 }
 
 
@@ -400,13 +401,30 @@ def _as_scalar_loss(loss: torch.Tensor) -> torch.Tensor:
 def _resolve_device() -> torch.device:
     if torch.cuda.is_available():
         try:
-            _ = torch.zeros(1, device="cuda")
-            return torch.device("cuda")
+            torch.cuda.set_device(0)
+            _ = torch.zeros(1, device="cuda:0")
+            return torch.device("cuda:0")
         except Exception:
             pass
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def _loader_batch_count(n_samples: int, batch_size: int) -> int:
+    return max((n_samples + batch_size - 1) // batch_size, 1)
+
+
+def _autocast_ctx(device: torch.device):
+    if device.type == "cuda":
+        return torch.amp.autocast("cuda")
+    return torch.amp.autocast("cpu", enabled=False)
+
+
+def _make_grad_scaler(use_fp16: bool, device: torch.device):
+    if not use_fp16 or device.type != "cuda":
+        return None
+    return torch.amp.GradScaler("cuda")
 
 
 def _is_prequantized_checkpoint(model_name: str) -> bool:
@@ -529,22 +547,23 @@ def _train_epoch(
     optimizer,
     scheduler,
     device: torch.device,
-    scaler: Optional[torch.cuda.amp.GradScaler],
+    scaler: Optional[torch.amp.GradScaler],
     epoch: int,
     grad_accum: int = 1,
+    overall_bar: Optional[tqdm] = None,
 ) -> float:
     model.train()
     total_loss = 0.0
     n_batches = 0
     optimizer.zero_grad(set_to_none=True)
 
-    for step, batch in enumerate(tqdm(loader, desc=f"train epoch {epoch}", leave=False)):
+    for step, batch in enumerate(tqdm(loader, desc=f"train epoch {epoch}", leave=False, position=2)):
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         labels = batch["labels"].to(device)
 
         if scaler is not None:
-            with torch.cuda.amp.autocast():
+            with _autocast_ctx(device):
                 out = model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -572,6 +591,8 @@ def _train_epoch(
 
         total_loss += float(loss.item()) * grad_accum
         n_batches += 1
+        if overall_bar is not None:
+            overall_bar.update(1)
 
     optimizer_steps = max(0, n_batches // grad_accum)
     if n_batches > 0 and n_batches % grad_accum != 0:
@@ -585,17 +606,18 @@ def _train_epoch_winogrande(
     optimizer,
     scheduler,
     device: torch.device,
-    scaler: Optional[torch.cuda.amp.GradScaler],
+    scaler: Optional[torch.amp.GradScaler],
     epoch: int,
     cfg: TrainConfig,
     grad_accum: int = 1,
+    overall_bar: Optional[tqdm] = None,
 ) -> float:
     model.train()
     total_loss = 0.0
     n_batches = 0
     optimizer.zero_grad(set_to_none=True)
 
-    for step, batch in enumerate(tqdm(loader, desc=f"train epoch {epoch}", leave=False)):
+    for step, batch in enumerate(tqdm(loader, desc=f"train epoch {epoch}", leave=False, position=2)):
         labels = batch["labels"].to(device)
         model_inputs = {
             key: value.to(device)
@@ -604,7 +626,7 @@ def _train_epoch_winogrande(
         }
 
         if scaler is not None:
-            with torch.cuda.amp.autocast():
+            with _autocast_ctx(device):
                 out = model(**model_inputs, labels=labels)
                 loss = _as_scalar_loss(out.loss) / grad_accum
             scaler.scale(loss).backward()
@@ -624,6 +646,8 @@ def _train_epoch_winogrande(
 
         total_loss += float(loss.item()) * grad_accum
         n_batches += 1
+        if overall_bar is not None:
+            overall_bar.update(1)
 
     optimizer_steps = max(0, n_batches // grad_accum)
     if n_batches > 0 and n_batches % grad_accum != 0:
@@ -637,11 +661,12 @@ def _collect_epoch_predictions(
     loader: DataLoader,
     device: torch.device,
     epoch: int,
+    overall_bar: Optional[tqdm] = None,
 ) -> List[Dict]:
     model.eval()
     records: List[Dict] = []
 
-    for batch in tqdm(loader, desc=f"collect epoch {epoch}", leave=False):
+    for batch in tqdm(loader, desc=f"collect epoch {epoch}", leave=False, position=2):
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         labels = batch["labels"].to(device)
@@ -663,6 +688,8 @@ def _collect_epoch_predictions(
                     "prob_gold": round(float(probs[i, gold].item()), 6),
                 }
             )
+        if overall_bar is not None:
+            overall_bar.update(1)
     return records
 
 
@@ -695,6 +722,9 @@ def _collect_winogrande_epoch_predictions(
     device: torch.device,
     epoch: int,
     max_length: int,
+    *,
+    collect_batch_size: int = 64,
+    overall_bar: Optional[tqdm] = None,
 ) -> List[Dict]:
     """
     Have just one dynamics row per WinoGrande item using pairwise option probabilities --> following paper
@@ -703,13 +733,13 @@ def _collect_winogrande_epoch_predictions(
     records: List[Dict] = []
     loader = DataLoader(
         WinograndePairDataset(raw_rows),
-        batch_size=64,
+        batch_size=collect_batch_size,
         shuffle=False,
         num_workers=0,
         pin_memory=device.type == "cuda",
         collate_fn=lambda b: _collate_winogrande_pairs(b, tokenizer, max_length),
     )
-    for batch in tqdm(loader, desc=f"collect epoch {epoch}", leave=False):
+    for batch in tqdm(loader, desc=f"collect epoch {epoch}", leave=False, position=2):
         model_inputs = {
             key: value.to(device)
             for key, value in batch.items()
@@ -733,6 +763,8 @@ def _collect_winogrande_epoch_predictions(
                     "prob_gold": round(prob_gold, 6),
                 }
             )
+        if overall_bar is not None:
+            overall_bar.update(1)
     return records
 
 
@@ -792,7 +824,7 @@ def train_and_collect_dynamics(
     torch.manual_seed(cfg.seed)
     device = _resolve_device()
     use_fp16 = cfg.fp16 and device.type == "cuda" and not cfg.load_in_4bit
-    scaler = torch.cuda.amp.GradScaler() if use_fp16 else None
+    scaler = _make_grad_scaler(use_fp16, device)
     grad_accum = max(1, cfg.gradient_accumulation_steps)
 
     is_winogrande = cfg.dataset.lower() == "winogrande"
@@ -832,6 +864,11 @@ def train_and_collect_dynamics(
     if cfg.use_data_parallel and n_visible_gpus > 1 and not cfg.load_in_4bit:
         model = torch.nn.DataParallel(model)
         print(f"DataParallel enabled across {n_visible_gpus} GPUs")
+    elif device.type == "cuda":
+        try:
+            print(f"single GPU: cuda:0 ({torch.cuda.get_device_name(0)})")
+        except Exception:
+            print("single GPU: cuda:0")
 
     if is_winogrande:
         train_ds = WinograndePairDataset(train_raw)
@@ -873,12 +910,13 @@ def train_and_collect_dynamics(
         [p for p in model.parameters() if p.requires_grad],
         lr=cfg.learning_rate,
     )
+    total_batches_per_epoch = _loader_batch_count(len(train_ds), cfg.batch_size)
     if is_winogrande:
-        total_batches_per_epoch = max((len(train_ds) + cfg.batch_size - 1) // cfg.batch_size, 1)
+        collect_batches_per_epoch = _loader_batch_count(len(train_raw), cfg.eval_batch_size)
     else:
-        total_batches_per_epoch = max(len(train_ds) // cfg.batch_size, 1)
-        if len(train_ds) % cfg.batch_size != 0:
-            total_batches_per_epoch += 1
+        collect_batches_per_epoch = _loader_batch_count(len(train_ds), cfg.eval_batch_size)
+    batches_per_epoch = total_batches_per_epoch + collect_batches_per_epoch
+    total_progress_batches = batches_per_epoch * cfg.epochs
     total_optimizer_steps = max(
         ((total_batches_per_epoch + grad_accum - 1) // grad_accum) * cfg.epochs,
         1,
@@ -890,179 +928,214 @@ def train_and_collect_dynamics(
         total_optimizer_steps,
     )
 
-    with tqdm(range(1, cfg.epochs + 1), desc="epochs", unit="epoch") as epoch_bar:
-      for epoch in epoch_bar:
-        if is_winogrande:
-            train_loader = _build_winogrande_pair_loader(train_ds, cfg, tokenizer, device)
-        else:
-            train_loader = _build_train_loader(train_ds, cfg, sample_weights, device)
+    print(
+        f"train: {len(train_raw)} examples, {cfg.epochs} epochs, "
+        f"{total_batches_per_epoch} train + {collect_batches_per_epoch} collect batches/epoch"
+    )
+    total_bar = tqdm(
+        total=total_progress_batches,
+        desc="total",
+        unit="batch",
+        position=0,
+        leave=True,
+    )
+    epoch_bar = tqdm(
+        range(1, cfg.epochs + 1),
+        desc="epochs",
+        unit="epoch",
+        position=1,
+        leave=True,
+    )
+    try:
+        for epoch in epoch_bar:
+            if is_winogrande:
+                train_loader = _build_winogrande_pair_loader(train_ds, cfg, tokenizer, device)
+            else:
+                train_loader = _build_train_loader(train_ds, cfg, sample_weights, device)
 
-        if is_winogrande:
-            train_loss, optimizer_steps = _train_epoch_winogrande(
-                model,
-                train_loader,
-                optimizer,
-                scheduler,
-                device,
-                scaler,
-                epoch,
-                cfg,
-                grad_accum=grad_accum,
-            )
-        else:
-            train_loss, optimizer_steps = _train_epoch(
-                model,
-                train_loader,
-                optimizer,
-                scheduler,
-                device,
-                scaler,
-                epoch,
-                grad_accum=grad_accum,
-            )
-        cumulative_optimizer_steps += optimizer_steps
-        param_units = optimizer_steps * trainable_params
-        cumulative_param_units += param_units
-        if is_winogrande:
-            val_acc = _evaluate_winogrande_accuracy(
-                model, tokenizer, val_raw, device, cfg.max_length
-            )
-            epoch_records = _collect_winogrande_epoch_predictions(
-                model, tokenizer, train_raw, device, epoch, cfg.max_length
-            )
-        else:
-            val_acc = _evaluate_accuracy(model, val_loader, device)
-            epoch_records = _collect_epoch_predictions(
-                model, collect_loader, device, epoch
-            )
-        all_records.extend(epoch_records)
-
-        coords = records_to_coordinates(all_records, max_epoch=epoch)
-        if cfg.dynamic_snapshots and snapshot_dir:
-            snap_path = save_snapshot(coords, snapshot_dir, epoch)
-            snapshot_paths.append((epoch, snap_path))
-
-        movement_log: Dict[str, float] = {}
-        if cfg.dynamic_snapshots:
-            from ml_cartography.analysis.movement_metrics import (
-                compute_epoch_movement,
-                compute_learnability_efficiency,
-                save_learnability_vs_compute_plot,
-                save_transition_heatmap,
-                strip_internal_keys,
-            )
-
-            movement = compute_epoch_movement(prev_snapshot_coords, coords)
-            transition = movement.pop("_transition_matrix", None)
-            delta_learn = float(
-                movement.get("learnability/delta", movement.get("learnability/index", 0.0))
-            )
-            movement.update(
-                compute_learnability_efficiency(
-                    delta_learnability=delta_learn,
-                    optimizer_steps=optimizer_steps,
-                    trainable_params=trainable_params,
-                    batch_size=cfg.batch_size,
-                    seq_length=cfg.max_length,
+            if is_winogrande:
+                train_loss, optimizer_steps = _train_epoch_winogrande(
+                    model,
+                    train_loader,
+                    optimizer,
+                    scheduler,
+                    device,
+                    scaler,
+                    epoch,
+                    cfg,
+                    grad_accum=grad_accum,
+                    overall_bar=total_bar,
                 )
-            )
-            movement["compute/cumulative_optimizer_steps"] = float(cumulative_optimizer_steps)
-            movement["compute/cumulative_param_update_units"] = float(cumulative_param_units)
-            idea2_metric_history.append(dict(movement))
-            movement_log = strip_internal_keys(movement)
-            if transition is not None and epoch > 1 and snapshot_dir:
-                save_transition_heatmap(
-                    transition,
-                    snapshot_dir / f"epoch_{epoch:03d}_region_transition.png",
-                    title=f"Region transitions → epoch {epoch}",
+            else:
+                train_loss, optimizer_steps = _train_epoch(
+                    model,
+                    train_loader,
+                    optimizer,
+                    scheduler,
+                    device,
+                    scaler,
+                    epoch,
+                    grad_accum=grad_accum,
+                    overall_bar=total_bar,
                 )
+            cumulative_optimizer_steps += optimizer_steps
+            param_units = optimizer_steps * trainable_params
+            cumulative_param_units += param_units
+            if is_winogrande:
+                val_acc = _evaluate_winogrande_accuracy(
+                    model, tokenizer, val_raw, device, cfg.max_length
+                )
+                epoch_records = _collect_winogrande_epoch_predictions(
+                    model,
+                    tokenizer,
+                    train_raw,
+                    device,
+                    epoch,
+                    cfg.max_length,
+                    collect_batch_size=cfg.eval_batch_size,
+                    overall_bar=total_bar,
+                )
+            else:
+                val_acc = _evaluate_accuracy(model, val_loader, device)
+                epoch_records = _collect_epoch_predictions(
+                    model, collect_loader, device, epoch, overall_bar=total_bar
+                )
+            all_records.extend(epoch_records)
+
+            coords = records_to_coordinates(all_records, max_epoch=epoch)
+            if cfg.dynamic_snapshots and snapshot_dir:
+                snap_path = save_snapshot(coords, snapshot_dir, epoch)
+                snapshot_paths.append((epoch, snap_path))
+
+            movement_log: Dict[str, float] = {}
+            if cfg.dynamic_snapshots:
+                from ml_cartography.analysis.movement_metrics import (
+                    compute_epoch_movement,
+                    compute_learnability_efficiency,
+                    save_learnability_vs_compute_plot,
+                    save_transition_heatmap,
+                    strip_internal_keys,
+                )
+
+                movement = compute_epoch_movement(prev_snapshot_coords, coords)
+                transition = movement.pop("_transition_matrix", None)
+                delta_learn = float(
+                    movement.get("learnability/delta", movement.get("learnability/index", 0.0))
+                )
+                movement.update(
+                    compute_learnability_efficiency(
+                        delta_learnability=delta_learn,
+                        optimizer_steps=optimizer_steps,
+                        trainable_params=trainable_params,
+                        batch_size=cfg.batch_size,
+                        seq_length=cfg.max_length,
+                    )
+                )
+                movement["compute/cumulative_optimizer_steps"] = float(cumulative_optimizer_steps)
+                movement["compute/cumulative_param_update_units"] = float(cumulative_param_units)
+                idea2_metric_history.append(dict(movement))
+                movement_log = strip_internal_keys(movement)
+                if transition is not None and epoch > 1 and snapshot_dir:
+                    save_transition_heatmap(
+                        transition,
+                        snapshot_dir / f"epoch_{epoch:03d}_region_transition.png",
+                        title=f"Region transitions → epoch {epoch}",
+                    )
+                if snapshot_dir:
+                    save_learnability_vs_compute_plot(
+                        idea2_metric_history,
+                        snapshot_dir / "learnability_vs_compute.png",
+                    )
+                prev_snapshot_coords = coords
+
+            metric_row = {
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_accuracy": val_acc,
+                "num_prediction_rows": len(epoch_records),
+                "compute/optimizer_steps_epoch": optimizer_steps,
+                "compute/cumulative_optimizer_steps": cumulative_optimizer_steps,
+                "compute/cumulative_param_update_units": cumulative_param_units,
+                **movement_log,
+            }
+            if metrics_log:
+                append_training_metric(metrics_log, metric_row)
+
+            epoch_bar.set_postfix(
+                loss=f"{train_loss:.4f}",
+                val_acc=f"{val_acc:.4f}",
+                refresh=False,
+            )
+            total_bar.set_postfix(
+                epoch=f"{epoch}/{cfg.epochs}",
+                loss=f"{train_loss:.4f}",
+                refresh=False,
+            )
+
+            epoch_figure_paths: List[Path] = []
             if snapshot_dir:
-                save_learnability_vs_compute_plot(
-                    idea2_metric_history,
-                    snapshot_dir / "learnability_vs_compute.png",
-                )
-            prev_snapshot_coords = coords
+                from ml_cartography.analysis.data_map import save_data_map_plot
 
-        metric_row = {
-            "epoch": epoch,
-            "train_loss": train_loss,
-            "val_accuracy": val_acc,
-            "num_prediction_rows": len(epoch_records),
-            "compute/optimizer_steps_epoch": optimizer_steps,
-            "compute/cumulative_optimizer_steps": cumulative_optimizer_steps,
-            "compute/cumulative_param_update_units": cumulative_param_units,
-            **movement_log,
-        }
-        if metrics_log:
-            append_training_metric(metrics_log, metric_row)
-
-        epoch_bar.set_postfix(
-            loss=f"{train_loss:.4f}",
-            val_acc=f"{val_acc:.4f}",
-            refresh=False,
-        )
-
-        epoch_figure_paths: List[Path] = []
-        if snapshot_dir:
-            from ml_cartography.analysis.data_map import save_data_map_plot
-
-            paper_style = cfg.dataset.lower() in PAPER_STYLE_DATASETS
-            map_title = f"{cfg.dataset.upper()} data map (through epoch {epoch})"
-            correctness_path = snapshot_dir / f"epoch_{epoch:03d}_data_map_correctness.png"
-            save_data_map_plot(
-                coords,
-                correctness_path,
-                color_by="correctness" if paper_style else "region",
-                title=map_title,
-            )
-            epoch_figure_paths.append(correctness_path)
-            if paper_style:
-                regions_path = snapshot_dir / f"epoch_{epoch:03d}_data_map_regions.png"
+                paper_style = cfg.dataset.lower() in PAPER_STYLE_DATASETS
+                map_title = f"{cfg.dataset.upper()} data map (through epoch {epoch})"
+                correctness_path = snapshot_dir / f"epoch_{epoch:03d}_data_map_correctness.png"
                 save_data_map_plot(
                     coords,
-                    regions_path,
-                    color_by="region",
-                    title=f"{map_title} (by region)",
+                    correctness_path,
+                    color_by="correctness" if paper_style else "region",
+                    title=map_title,
                 )
-                epoch_figure_paths.append(regions_path)
-
-        if wandb_run is not None:
-            import wandb
-
-            log_payload = dict(metric_row)
-            for fig_path in epoch_figure_paths:
-                log_payload[f"charts/{fig_path.stem}"] = wandb.Image(str(fig_path))
-            if epoch > 1 and snapshot_dir:
-                heatmap = snapshot_dir / f"epoch_{epoch:03d}_region_transition.png"
-                if heatmap.is_file():
-                    log_payload[f"idea2/region_transition_epoch_{epoch}"] = wandb.Image(
-                        str(heatmap)
+                epoch_figure_paths.append(correctness_path)
+                if paper_style:
+                    regions_path = snapshot_dir / f"epoch_{epoch:03d}_data_map_regions.png"
+                    save_data_map_plot(
+                        coords,
+                        regions_path,
+                        color_by="region",
+                        title=f"{map_title} (by region)",
                     )
-            if snapshot_dir:
-                eff_plot = snapshot_dir / "learnability_vs_compute.png"
-                if eff_plot.is_file():
-                    log_payload["idea2/learnability_vs_compute"] = wandb.Image(str(eff_plot))
-            wandb.log(log_payload, step=epoch)
+                    epoch_figure_paths.append(regions_path)
 
-        if cfg.checkpoint_dir:
-            ckpt = cfg.checkpoint_dir / f"epoch-{epoch}"
-            ckpt.mkdir(parents=True, exist_ok=True)
-            _unwrap_model(model).save_pretrained(ckpt)
-            tokenizer.save_pretrained(ckpt)
+            if wandb_run is not None:
+                import wandb
 
-        # adaptive curriculum for remaining epochs (Idea #2)
-        if (
-            cfg.curriculum_after_epoch > 0
-            and epoch >= cfg.curriculum_after_epoch
-            and epoch < cfg.epochs
-        ):
-            coords = records_to_coordinates(all_records, max_epoch=epoch)
-            guid_w = curriculum_weights_from_coordinates(
-                coords,
-                ambiguous_boost=cfg.curriculum_ambiguous_boost,
-                easy_scale=cfg.curriculum_easy_scale,
-            )
-            sample_weights = guid_weights_to_sample_weights(train_guids, guid_w)
+                log_payload = dict(metric_row)
+                for fig_path in epoch_figure_paths:
+                    log_payload[f"charts/{fig_path.stem}"] = wandb.Image(str(fig_path))
+                if epoch > 1 and snapshot_dir:
+                    heatmap = snapshot_dir / f"epoch_{epoch:03d}_region_transition.png"
+                    if heatmap.is_file():
+                        log_payload[f"idea2/region_transition_epoch_{epoch}"] = wandb.Image(
+                            str(heatmap)
+                        )
+                if snapshot_dir:
+                    eff_plot = snapshot_dir / "learnability_vs_compute.png"
+                    if eff_plot.is_file():
+                        log_payload["idea2/learnability_vs_compute"] = wandb.Image(str(eff_plot))
+                wandb.log(log_payload, step=epoch)
+
+            if cfg.checkpoint_dir:
+                ckpt = cfg.checkpoint_dir / f"epoch-{epoch}"
+                ckpt.mkdir(parents=True, exist_ok=True)
+                _unwrap_model(model).save_pretrained(ckpt)
+                tokenizer.save_pretrained(ckpt)
+
+            # adaptive curriculum for remaining epochs (Idea #2)
+            if (
+                cfg.curriculum_after_epoch > 0
+                and epoch >= cfg.curriculum_after_epoch
+                and epoch < cfg.epochs
+            ):
+                coords = records_to_coordinates(all_records, max_epoch=epoch)
+                guid_w = curriculum_weights_from_coordinates(
+                    coords,
+                    ambiguous_boost=cfg.curriculum_ambiguous_boost,
+                    easy_scale=cfg.curriculum_easy_scale,
+                )
+                sample_weights = guid_weights_to_sample_weights(train_guids, guid_w)
+    finally:
+        total_bar.close()
+        epoch_bar.close()
 
     with cfg.output_logs.open("w", encoding="utf-8") as f:
         for row in all_records:
@@ -1090,7 +1163,7 @@ def train_and_collect_dynamics(
             print(f"using device: {device}")
     summary = {
         "device": str(device),
-        "num_gpus": n_visible_gpus if cfg.use_data_parallel and n_visible_gpus > 1 else max(n_visible_gpus, 1),
+        "num_gpus": n_visible_gpus if cfg.use_data_parallel and n_visible_gpus > 1 else 1,
         "dataset": cfg.dataset,
         "model_name": cfg.model_name,
         "num_train": len(train_raw),

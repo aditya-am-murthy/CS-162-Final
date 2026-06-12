@@ -253,8 +253,16 @@ def plot_extra_04_bilateral_transitions(
         ax.set_title(title)
         for i in range(len(REGIONS)):
             for j in range(len(REGIONS)):
-                if mat[i, j] > 0:
-                    ax.text(j, i, str(int(mat[i, j])), ha="center", va="center", fontsize=8)
+                count = int(mat[i, j])
+                ax.text(
+                    j,
+                    i,
+                    str(count),
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    color="#555555" if count == 0 else "black",
+                )
     fig.suptitle("Extra #4: Bilateral 1% flip — region cross-eval", fontsize=12, y=1.02)
     fig.tight_layout()
     _save(fig, output_path)

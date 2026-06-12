@@ -31,6 +31,7 @@ from ml_cartography.analysis.extension_figures import (
     plot_extra_04_recovery_bars,
     plot_extra_04_summary_table,
 )
+from ml_cartography.analysis.data_map import assign_region
 from ml_cartography.experiments.bilateral_noise import (
     bilateral_comparison,
     detector_cross_eval,
@@ -53,6 +54,38 @@ from scripts.common import (
 )
 
 TRAIN_SCRIPT = _root / "scripts" / "train_and_collect_dynamics.py"
+
+
+def _rows_for_flip_selection(
+    original_rows: list[dict],
+    args: argparse.Namespace,
+) -> list[dict]:
+    """Match flip cohort to the same train guids used by glue_trainer subsampling."""
+    max_n = args.max_train_samples
+    if max_n is None or max_n <= 0:
+        return original_rows
+    from ml_cartography.training.glue_trainer import _load_dataset_rows
+
+    train_raw = _load_dataset_rows(
+        args.dataset,
+        "train",
+        max_n,
+        None,
+        args.seed,
+        winogrande_config=args.winogrande_config,
+    )
+    guids = {str(r["guid"]) for r in train_raw}
+    filtered = [r for r in original_rows if str(r["guid"]) in guids]
+    if not filtered:
+        raise ValueError(
+            "no coordinate rows overlap the training subsample; "
+            "check --input guids vs --max-train-samples"
+        )
+    print(
+        f"flip selection on {len(filtered)} / {len(original_rows)} train examples "
+        f"(max_train_samples={max_n})"
+    )
+    return filtered
 
 
 def _collect_dynamics_from_logs(log_path: Path) -> list[dict]:
@@ -339,6 +372,7 @@ def _aggregate_hard_shifts(
         row["variability_delta"] = row["variability_after"] - row["variability_before"]
         row["recovered"] = row["confidence_delta"] > 0.05
         row["degraded"] = row["confidence_delta"] < -0.05
+        row["region_after"] = assign_region(row["confidence_after"], row["variability_after"])
 
     per_restart = [summarize_arm_shift(
         shift_rows_for_arm(
@@ -438,6 +472,11 @@ def main() -> None:
         default=Path("data/processed/noise_detection_paper"),
         help="Reuse completed paper §5 easy-flip run instead of retraining easy arm.",
     )
+    parser.add_argument(
+        "--no-reuse-easy",
+        action="store_true",
+        help="Train easy arm locally (required when --max-train-samples subsamples).",
+    )
     parser.add_argument("--train", action="store_true", help="Run retraining for missing arms.")
     parser.add_argument("--arms", nargs="+", default=["easy", "hard"], choices=["easy", "hard"])
     parser.add_argument("--dataset", choices=["snli", "mnli", "qnli", "winogrande"], default="winogrande")
@@ -447,13 +486,18 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--max-length", type=int, default=256)
-    parser.add_argument("--max-train-samples", type=int, default=0)
-    parser.add_argument("--max-eval-samples", type=int, default=0)
+    parser.add_argument(
+        "--max-train-samples",
+        type=int,
+        default=5000,
+        help="Cap train size (0 = full dataset; default 5000 for lighter runs)",
+    )
+    parser.add_argument("--max-eval-samples", type=int, default=1000)
     parser.add_argument("--winogrande-config", default="winogrande_xl")
     parser.add_argument(
         "--gpus",
-        default="0,1,2,3,4",
-        help="Comma-separated GPU ids; hard arm uses all of them with DataParallel.",
+        default="0",
+        help="Comma-separated GPU ids (single GPU by default).",
     )
     parser.add_argument(
         "--restarts",
@@ -464,8 +508,8 @@ def main() -> None:
     parser.add_argument(
         "--multi-gpu",
         action="store_true",
-        default=True,
-        help="Spread hard-arm training across all --gpus via DataParallel (default on).",
+        default=False,
+        help="Spread hard-arm training across all --gpus via DataParallel.",
     )
     parser.add_argument(
         "--no-multi-gpu",
@@ -492,6 +536,10 @@ def main() -> None:
     original_rows = read_jsonl(input_path)
     if not original_rows:
         raise ValueError(f"no rows in {input_path}")
+    flip_rows = _rows_for_flip_selection(original_rows, args)
+    if args.max_train_samples > 0 and not args.no_reuse_easy:
+        print("subsampled run: pass --no-reuse-easy to train easy arm on the same subset")
+        args.no_reuse_easy = True
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     easy_dir = args.output_dir / "easy_arm"
@@ -500,17 +548,17 @@ def main() -> None:
     hard_dir.mkdir(parents=True, exist_ok=True)
 
     reuse_easy_overrides = args.reuse_easy_dir / "label_overrides.json"
-    if reuse_easy_overrides.is_file():
+    if not args.no_reuse_easy and reuse_easy_overrides.is_file():
         payload = json.loads(reuse_easy_overrides.read_text(encoding="utf-8"))
         easy_overrides = {str(k): int(v) for k, v in payload.get("label_overrides", payload).items()}
         easy_flips = read_jsonl(args.reuse_easy_dir / "flipped_examples.jsonl")
         if not easy_flips:
             easy_flips, easy_overrides = select_flip_arm(
-                original_rows, arm="easy", flip_ratio=args.flip_ratio, dataset=args.dataset, seed=args.seed
+                flip_rows, arm="easy", flip_ratio=args.flip_ratio, dataset=args.dataset, seed=args.seed
             )
     else:
         easy_flips, easy_overrides = select_flip_arm(
-            original_rows, arm="easy", flip_ratio=args.flip_ratio, dataset=args.dataset, seed=args.seed
+            flip_rows, arm="easy", flip_ratio=args.flip_ratio, dataset=args.dataset, seed=args.seed
         )
 
     hard_override_path = hard_dir / "label_overrides.json"
@@ -520,7 +568,7 @@ def main() -> None:
         hard_flips = read_jsonl(hard_dir / "flipped_examples.jsonl")
     else:
         hard_flips, hard_overrides = select_flip_arm(
-            original_rows, arm="hard", flip_ratio=args.flip_ratio, dataset=args.dataset, seed=args.seed + 1
+            flip_rows, arm="hard", flip_ratio=args.flip_ratio, dataset=args.dataset, seed=args.seed + 1
         )
 
     easy_guids = set(easy_overrides)
@@ -545,10 +593,16 @@ def main() -> None:
 
     arm_results: Dict[str, dict] = {}
 
-    reused_easy = _load_existing_arm(args.reuse_easy_dir, "easy")
+    reused_easy = None if args.no_reuse_easy else _load_existing_arm(args.reuse_easy_dir, "easy")
     if reused_easy:
         arm_results["easy"] = reused_easy
         print(f"reusing easy arm from {args.reuse_easy_dir}")
+    elif args.no_reuse_easy and not args.train:
+        easy_run = easy_dir / "training_runs" / "restart_00"
+        loaded_easy = _load_restart_run(easy_run) or _load_existing_arm(easy_dir, "easy")
+        if loaded_easy:
+            arm_results["easy"] = loaded_easy
+            print(f"reusing easy arm from {easy_dir}")
 
     hard_restart_runs: list[dict] = []
     for restart_idx in range(args.restarts):

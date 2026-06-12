@@ -69,7 +69,7 @@ RESTARTS=3 GPUS=0,1,2 EPOCHS=6 bash scripts/run_exp_04_table2_winogrande.sh
 | 4 Bilateral 1% flip | `run_exp_11_extra_bilateral_noise.sh` | `Extra_04_bilateral_*` |
 
 ```bash
-# Extra #4: easy arm reuses Fig 4 run; hard arm uses one DataParallel run on GPUs 0–4
+# Extra #4: easy arm reuses Fig 4 run; hard arm uses single GPU (5k subsample by default)
 GPUS=0,1,2,3,4 bash scripts/run_exp_11_extra_bilateral_noise.sh
 python scripts/collect_extension_outputs.py
 ```
