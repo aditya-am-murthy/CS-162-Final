@@ -32,6 +32,7 @@ experiments/runs/*
 !experiments/runs/.gitkeep
 results/report.md
 paper_outputs/manifest.json
+extension_outputs/manifest.json
 
 # DS Store
 .DS_Store

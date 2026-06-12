@@ -56,7 +56,23 @@ RESTARTS=3 GPUS=0,1,2 EPOCHS=6 bash scripts/run_exp_04_table2_winogrande.sh
 | `run_exp_08_table3_snli_mnli.sh` | Table 3 | `09_region_finetune.py` |
 | `run_exp_09_table4_qnli.sh` | Table 4 | `09_region_finetune.py`, `11` |
 | `run_exp_10_subregion_compute_gain.sh` | Compute vs gain | `09` epoch sweep |
+| `run_exp_11_extra_bilateral_noise.sh` | **Extra #4** bilateral 1% flip | `13_bilateral_noise_flip.py` |
 | `run_all_remaining_experiments.sh` | All of the above | tmux multi-window queue |
+
+## Extra experiments (beyond paper)
+
+| # | Script / collector | Output |
+|---|-------------------|--------|
+| 1 Multi-architecture maps | `collect_extension_outputs.py` | `extension_outputs/Extra_01_*` |
+| 2 Preference cartography | same | `Extra_02_preference_data_map.png` |
+| 3 Dynamic curriculum | same | `Extra_03_dynamic_*` |
+| 4 Bilateral 1% flip | `run_exp_11_extra_bilateral_noise.sh` | `Extra_04_bilateral_*` |
+
+```bash
+# Extra #4: easy arm reuses Fig 4 run; hard arm runs 5 restarts on GPUs 0–4
+GPUS=0,1,2,3,4 RESTARTS=5 bash scripts/run_exp_11_extra_bilateral_noise.sh
+python scripts/collect_extension_outputs.py
+```
 
 ## CSV outputs
 
