@@ -96,6 +96,11 @@ def main() -> None:
         help="JSON/JSONL mapping guid to replacement train label",
     )
     parser.add_argument("--no-fp16", action="store_true", help="Disable mixed precision")
+    parser.add_argument(
+        "--multi-gpu",
+        action="store_true",
+        help="Spread one training run across all visible CUDA devices (DataParallel)",
+    )
     parser.add_argument("--checkpoint-dir", type=Path, default=None)
     parser.add_argument(
         "--summary-out",
@@ -151,6 +156,7 @@ def main() -> None:
         label_overrides=label_overrides,
         winogrande_config=args.winogrande_config,
         snapshot_dir=args.figures_dir,
+        use_data_parallel=args.multi_gpu,
     )
     cfg = apply_preset_defaults(cfg, args.preset)
     if args.no_4bit:

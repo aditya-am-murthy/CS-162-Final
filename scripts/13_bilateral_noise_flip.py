@@ -83,9 +83,9 @@ def _parse_gpu_list(gpus: str) -> List[int]:
     return ids
 
 
-def _child_env(gpu_id: int) -> Dict[str, str]:
+def _child_env(gpu_ids: List[int]) -> Dict[str, str]:
     env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
     token, _ = resolve_hf_token(_root / "hf_credentials.txt")
     if token:
         env["HF_TOKEN"] = token
@@ -159,6 +159,8 @@ def _train_command(
         cmd.append("--no-fp16")
     if args.no_4bit:
         cmd.append("--no-4bit")
+    if getattr(args, "multi_gpu", False):
+        cmd.append("--multi-gpu")
     return cmd
 
 
@@ -174,109 +176,87 @@ def _tail_jsonl(path: Path) -> Optional[dict]:
     return last
 
 
-def _run_arms_parallel(
+def _run_training_jobs(
     args: argparse.Namespace,
-    jobs: List[Tuple[str, str, int, List[str], Path]],
+    jobs: List[Tuple[str, str, int, List[str], Path, List[int]]],
 ) -> Dict[str, dict]:
-    """Run training jobs in parallel. Each job is (job_key, arm, restart_idx, cmd, run_dir)."""
-    gpu_ids = _parse_gpu_list(args.gpus)
-    pending = list(jobs)
-    active: Dict[int, Tuple[Any, ...]] = {}
+    """Run training jobs. Each job is (job_key, arm, restart_idx, cmd, run_dir, gpu_ids)."""
     results: Dict[str, dict] = {}
     total_epochs = len(jobs) * args.epochs
-    last_epoch: Dict[str, int] = {}
-
     epoch_bar = tqdm(total=total_epochs, desc="bilateral epochs", unit="ep")
-    print(f"training {len(jobs)} jobs across GPUs {gpu_ids}")
 
     try:
-        while pending or active:
-            for gpu_id in gpu_ids:
-                if gpu_id in active or not pending:
-                    continue
-                job_key, arm, restart_idx, cmd, run_dir = pending.pop(0)
-                log_path = run_dir / "train.log"
-                print(f"\n>>> launch cuda:{gpu_id} [{job_key}]")
-                log_f = log_path.open("w", encoding="utf-8")
+        for job_key, arm, restart_idx, cmd, run_dir, gpu_ids in jobs:
+            log_path = run_dir / "train.log"
+            gpu_label = ",".join(str(g) for g in gpu_ids)
+            print(f"\n>>> launch cuda:[{gpu_label}] [{job_key}]")
+            if args.multi_gpu and len(gpu_ids) > 1:
+                print(f"    DataParallel across {len(gpu_ids)} GPUs")
+            last_epoch = 0
+            with log_path.open("w", encoding="utf-8") as log_f:
                 proc = subprocess.Popen(
                     cmd,
                     cwd=str(_root),
-                    env=_child_env(gpu_id),
+                    env=_child_env(gpu_ids),
                     stdout=log_f,
                     stderr=subprocess.STDOUT,
                     text=True,
                 )
-                active[gpu_id] = (proc, job_key, arm, restart_idx, run_dir, log_f)
+                while proc.poll() is None:
+                    latest = _tail_jsonl(run_dir / "training_metrics.jsonl")
+                    if latest:
+                        ep = int(latest.get("epoch", 0))
+                        if ep > last_epoch:
+                            epoch_bar.update(ep - last_epoch)
+                            last_epoch = ep
+                            val_acc = latest.get("val_accuracy")
+                            loss = latest.get("train_loss")
+                            msg = f"[epoch {ep}/{args.epochs}] {job_key} (gpus {gpu_label})"
+                            if loss is not None:
+                                msg += f" loss={float(loss):.4f}"
+                            if val_acc is not None:
+                                msg += f" val_acc={float(val_acc):.4f}"
+                            tqdm.write(msg)
+                            if use_wandb(args):
+                                import wandb
 
-            postfix = []
-            payload: Dict[str, Any] = {"orchestrator/jobs_active": len(active)}
-            for gpu_id, (_proc, job_key, arm, restart_idx, run_dir, _log_f) in active.items():
-                latest = _tail_jsonl(run_dir / "training_metrics.jsonl")
-                if latest:
-                    ep = int(latest.get("epoch", 0))
-                    prev = last_epoch.get(job_key, 0)
-                    if ep > prev:
-                        epoch_bar.update(ep - prev)
-                        last_epoch[job_key] = ep
-                        val_acc = latest.get("val_accuracy")
-                        loss = latest.get("train_loss")
-                        msg = f"[epoch {ep}/{args.epochs}] {job_key} (gpu {gpu_id})"
-                        if loss is not None:
-                            msg += f" loss={float(loss):.4f}"
-                        if val_acc is not None:
-                            msg += f" val_acc={float(val_acc):.4f}"
-                        tqdm.write(msg)
-                    postfix.append(f"gpu{gpu_id}:{job_key}e{ep}/{args.epochs}")
-                    payload[f"active/{job_key}/epoch"] = ep
-                    if latest.get("val_accuracy") is not None:
-                        payload[f"active/{job_key}/val_accuracy"] = float(latest["val_accuracy"])
-                else:
-                    postfix.append(f"gpu{gpu_id}:{job_key}:load")
+                                wandb.log(
+                                    {
+                                        f"active/{job_key}/epoch": ep,
+                                        f"active/{job_key}/val_accuracy": float(val_acc)
+                                        if val_acc is not None
+                                        else None,
+                                    },
+                                    step=epoch_bar.n,
+                                )
+                    epoch_bar.set_postfix_str(f"{job_key} e{last_epoch}/{args.epochs}", refresh=False)
+                    time.sleep(5)
 
-            if postfix:
-                epoch_bar.set_postfix_str(" | ".join(postfix[:6]), refresh=False)
-            if use_wandb(args) and len(payload) > 1:
+            rc = proc.returncode
+            if rc != 0:
+                tail = log_path.read_text(encoding="utf-8")[-3000:] if log_path.is_file() else ""
+                raise RuntimeError(f"{job_key} failed (exit {rc}):\n{tail}")
+            summary_path = run_dir / "training_summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.is_file() else {}
+            results[job_key] = {
+                "run_dir": str(run_dir),
+                "arm": arm,
+                "restart_idx": restart_idx,
+                **summary,
+            }
+            remaining = args.epochs - last_epoch
+            if remaining > 0:
+                epoch_bar.update(remaining)
+            if use_wandb(args):
                 import wandb
 
-                wandb.log(payload, step=epoch_bar.n)
-
-            finished: List[int] = []
-            for gpu_id, (proc, job_key, arm, restart_idx, run_dir, log_f) in active.items():
-                rc = proc.poll()
-                if rc is None:
-                    continue
-                finished.append(gpu_id)
-                log_f.close()
-                summary_path = run_dir / "training_summary.json"
-                if rc != 0:
-                    tail = (run_dir / "train.log").read_text(encoding="utf-8")[-3000:] if (run_dir / "train.log").is_file() else ""
-                    raise RuntimeError(f"{job_key} failed (exit {rc}):\n{tail}")
-                summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.is_file() else {}
-                results[job_key] = {
-                    "run_dir": str(run_dir),
-                    "arm": arm,
-                    "restart_idx": restart_idx,
-                    **summary,
-                }
-                remaining = args.epochs - last_epoch.get(job_key, 0)
-                if remaining > 0:
-                    epoch_bar.update(remaining)
-                    last_epoch[job_key] = args.epochs
-                if use_wandb(args):
-                    import wandb
-
-                    wandb.log(
-                        {
-                            f"final/{job_key}/val_accuracy": summary.get("final_val_accuracy"),
-                            f"final/{job_key}/num_train": summary.get("num_train"),
-                        },
-                        step=epoch_bar.n,
-                    )
-
-            for gpu_id in finished:
-                del active[gpu_id]
-            if active and not finished:
-                time.sleep(5)
+                wandb.log(
+                    {
+                        f"final/{job_key}/val_accuracy": summary.get("final_val_accuracy"),
+                        f"final/{job_key}/num_train": summary.get("num_train"),
+                    },
+                    step=epoch_bar.n,
+                )
     finally:
         epoch_bar.close()
 
@@ -473,13 +453,25 @@ def main() -> None:
     parser.add_argument(
         "--gpus",
         default="0,1,2,3,4",
-        help="Comma-separated GPUs for parallel hard-arm restarts (and easy arm if retrained).",
+        help="Comma-separated GPU ids; hard arm uses all of them with DataParallel.",
     )
     parser.add_argument(
         "--restarts",
         type=int,
-        default=5,
-        help="Independent hard-arm retraining runs (one per GPU when 5 GPUs available).",
+        default=1,
+        help="Hard-arm training runs to average (default 1 = single multi-GPU run).",
+    )
+    parser.add_argument(
+        "--multi-gpu",
+        action="store_true",
+        default=True,
+        help="Spread hard-arm training across all --gpus via DataParallel (default on).",
+    )
+    parser.add_argument(
+        "--no-multi-gpu",
+        action="store_false",
+        dest="multi_gpu",
+        help="Train hard arm on a single GPU only.",
     )
     parser.add_argument("--no-fp16", action="store_true")
     parser.add_argument("--no-4bit", action="store_true")
@@ -568,11 +560,15 @@ def main() -> None:
     if hard_restart_runs:
         print(f"reusing {len(hard_restart_runs)} hard-arm restart(s) from {hard_dir}")
 
+    gpu_ids = _parse_gpu_list(args.gpus)
+    hard_gpu_ids = gpu_ids if args.multi_gpu else [gpu_ids[0]]
+
     if args.train and not args.analyze_only:
-        jobs: List[Tuple[str, str, int, List[str], Path]] = []
+        jobs: List[Tuple[str, str, int, List[str], Path, List[int]]] = []
         if "easy" in args.arms and "easy" not in arm_results:
             run_dir = easy_dir / "training_runs" / "restart_00"
             run_dir.mkdir(parents=True, exist_ok=True)
+            easy_args = argparse.Namespace(**{**vars(args), "multi_gpu": False})
             jobs.append(
                 (
                     "easy_r00",
@@ -580,13 +576,14 @@ def main() -> None:
                     0,
                     _train_command(
                         arm="easy",
-                        args=args,
+                        args=easy_args,
                         overrides_path=easy_dir / "label_overrides.json",
                         run_dir=run_dir,
                         seed=args.seed,
                         restart_idx=0,
                     ),
                     run_dir,
+                    [gpu_ids[0]],
                 )
             )
         if "hard" in args.arms:
@@ -610,10 +607,11 @@ def main() -> None:
                             restart_idx=restart_idx,
                         ),
                         run_dir,
+                        hard_gpu_ids,
                     )
                 )
         if jobs:
-            trained = _run_arms_parallel(args, jobs)
+            trained = _run_training_jobs(args, jobs)
             for job_key, summary in trained.items():
                 run_dir = Path(summary["run_dir"])
                 coords = _collect_dynamics_from_logs(run_dir / "epoch_predictions.jsonl")

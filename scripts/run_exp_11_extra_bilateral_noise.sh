@@ -14,7 +14,7 @@ SESSION="${SESSION:-cs162-extra-exp4-bilateral}"
 OUTPUT_DIR="${OUTPUT_DIR:-data/processed/bilateral_noise_flip}"
 EASY_REUSE="${EASY_REUSE:-data/processed/noise_detection_paper}"
 GPUS="${GPUS:-0,1,2,3,4}"
-RESTARTS="${RESTARTS:-5}"
+RESTARTS="${RESTARTS:-1}"
 EPOCHS="${EPOCHS:-${EXP_EPOCHS_WINO}}"
 BATCH_SIZE="${BATCH_SIZE:-${EXP_BATCH_SIZE_WINO}}"
 FLIP_RATIO="${FLIP_RATIO:-0.01}"
@@ -31,7 +31,7 @@ CMD="cd '$ROOT' && \
     --flip-ratio '$FLIP_RATIO' \
     --input '$EXP_INPUT' --output-dir '$OUTPUT_DIR' \
     --reuse-easy-dir '$EASY_REUSE' \
-    --gpus '$GPUS' --restarts '$RESTARTS' \
+    --gpus '$GPUS' --restarts '$RESTARTS' --multi-gpu \
     --wandb-run-name '$WANDB_NAME' --wandb-group '$WANDB_GROUP' && \
   $PYTHON scripts/collect_extension_outputs.py && \
   bash scripts/export_all_metrics.sh '$WANDB_GROUP' && \
@@ -39,7 +39,7 @@ CMD="cd '$ROOT' && \
 
 exp_tmux_start "$SESSION" extra-exp4 "$CMD 2>&1 | tee '$LOG'"
 exp_print_launch_summary "$SESSION" \
-  "GPUs: $GPUS | hard restarts: $RESTARTS (parallel)" \
+  "GPUs: $GPUS | hard arm: single DataParallel run (restarts=$RESTARTS)" \
   "flip_ratio: $FLIP_RATIO | epochs: $EPOCHS" \
   "reuse easy: $EASY_REUSE" \
   "output: $OUTPUT_DIR" \

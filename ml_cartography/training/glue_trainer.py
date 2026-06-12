@@ -53,6 +53,7 @@ class TrainConfig:
     # colab / large causal models
     load_in_4bit: bool = False
     gradient_checkpointing: bool = False
+    use_data_parallel: bool = False
     gradient_accumulation_steps: int = 1
     # ministral + unsloth 4-bit: full backbone FT often dtype/checkpoint errors on T4
     ministral_freeze_backbone: bool = True
@@ -387,6 +388,15 @@ def load_guids_from_jsonl(path: Path) -> Set[str]:
     return guids
 
 
+def _unwrap_model(model):
+    return model.module if isinstance(model, torch.nn.DataParallel) else model
+
+
+def _as_scalar_loss(loss: torch.Tensor) -> torch.Tensor:
+    """DataParallel gathers per-GPU losses into a vector; backward needs a scalar."""
+    return loss.mean() if loss.ndim > 0 else loss
+
+
 def _resolve_device() -> torch.device:
     if torch.cuda.is_available():
         try:
@@ -540,7 +550,7 @@ def _train_epoch(
                     attention_mask=attention_mask,
                     labels=labels,
                 )
-                loss = out.loss / grad_accum
+                loss = _as_scalar_loss(out.loss) / grad_accum
             scaler.scale(loss).backward()
         else:
             out = model(
@@ -548,7 +558,7 @@ def _train_epoch(
                 attention_mask=attention_mask,
                 labels=labels,
             )
-            loss = out.loss / grad_accum
+            loss = _as_scalar_loss(out.loss) / grad_accum
             loss.backward()
 
         if (step + 1) % grad_accum == 0:
@@ -596,11 +606,11 @@ def _train_epoch_winogrande(
         if scaler is not None:
             with torch.cuda.amp.autocast():
                 out = model(**model_inputs, labels=labels)
-                loss = out.loss / grad_accum
+                loss = _as_scalar_loss(out.loss) / grad_accum
             scaler.scale(loss).backward()
         else:
             out = model(**model_inputs, labels=labels)
-            loss = out.loss / grad_accum
+            loss = _as_scalar_loss(out.loss) / grad_accum
             loss.backward()
 
         if (step + 1) % grad_accum == 0:
@@ -818,6 +828,11 @@ def train_and_collect_dynamics(
     if not cfg.load_in_4bit:
         model.to(device)
 
+    n_visible_gpus = torch.cuda.device_count() if device.type == "cuda" else 0
+    if cfg.use_data_parallel and n_visible_gpus > 1 and not cfg.load_in_4bit:
+        model = torch.nn.DataParallel(model)
+        print(f"DataParallel enabled across {n_visible_gpus} GPUs")
+
     if is_winogrande:
         train_ds = WinograndePairDataset(train_raw)
         val_loader = None
@@ -1032,7 +1047,7 @@ def train_and_collect_dynamics(
         if cfg.checkpoint_dir:
             ckpt = cfg.checkpoint_dir / f"epoch-{epoch}"
             ckpt.mkdir(parents=True, exist_ok=True)
-            model.save_pretrained(ckpt)
+            _unwrap_model(model).save_pretrained(ckpt)
             tokenizer.save_pretrained(ckpt)
 
         # adaptive curriculum for remaining epochs (Idea #2)
@@ -1056,7 +1071,7 @@ def train_and_collect_dynamics(
     if cfg.checkpoint_dir:
         final_dir = cfg.checkpoint_dir.parent / "final"
         final_dir.mkdir(parents=True, exist_ok=True)
-        model.save_pretrained(final_dir)
+        _unwrap_model(model).save_pretrained(final_dir)
         tokenizer.save_pretrained(final_dir)
 
     if device.type == "cpu":
@@ -1066,11 +1081,16 @@ def train_and_collect_dynamics(
         )
     else:
         try:
-            print(f"using device: {device} ({torch.cuda.get_device_name(0)})")
+            if cfg.use_data_parallel and n_visible_gpus > 1:
+                names = ", ".join(torch.cuda.get_device_name(i) for i in range(n_visible_gpus))
+                print(f"using device: {device} DataParallel on {n_visible_gpus} GPUs ({names})")
+            else:
+                print(f"using device: {device} ({torch.cuda.get_device_name(0)})")
         except Exception:
             print(f"using device: {device}")
     summary = {
         "device": str(device),
+        "num_gpus": n_visible_gpus if cfg.use_data_parallel and n_visible_gpus > 1 else max(n_visible_gpus, 1),
         "dataset": cfg.dataset,
         "model_name": cfg.model_name,
         "num_train": len(train_raw),
